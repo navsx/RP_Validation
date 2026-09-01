@@ -293,7 +293,7 @@ elif mode == "📊 View Results":
     st.markdown("### Per-Question Breakdown")
     if "question_id" in results_df.columns and available_rating_cols:
         question_summary = results_df.groupby("question_id")[available_rating_cols].mean()
-        st.dataframe(question_summary.style.highlight_low(axis=1, props="color:red"))
+        st.dataframe(question_summary.style.highlight_min(axis=1, props="color:red"))
     else:
         st.info("Insufficient data for per-question breakdown.")
 
