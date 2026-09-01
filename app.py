@@ -25,55 +25,48 @@ def init_sheet():
     client = gspread.authorize(creds)
     return client.open_by_key(st.secrets["sheet_id"]).sheet1
 
-# ─── NEW: FETCH EXISTING SUBMISSIONS (cached 60s to respect API quota) ───
+# ─── FETCH EXISTING SUBMISSIONS ───
 @st.cache_data(ttl=60)
 def fetch_submissions():
+    """
+    Returns a DataFrame of all existing submissions.
+    Handles empty sheets, missing columns, and connection failures.
+    Always returns a DataFrame (possibly empty). Never crashes.
+    """
+    # 1. Try Google Sheets
     try:
         sheet = init_sheet()
         data = sheet.get_all_records()
-        sheet_headers = sheet.row_values(1)          # what the sheet actually has
-        data = sheet.get_all_records()
-        st.write("🔍 Raw Row 1:", sheet_headers)
-        st.write("🔍 Number of records:", len(data))
-        existing = pd.DataFrame(data)
-        st.write("🔍 DataFrame columns:", existing.columns.tolist())
-        existing.columns = [str(c).strip().lower() for c in existing.columns]
-        return existing
-    except Exception as e:
-        st.write("🔍Went straight to Exception")
         if not data:
-            st.write("No Data Found")
-            return pd.DataFrame() # Return empty DF if no data
-        
-        existing = pd.DataFrame(data)
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        return df
+    except Exception:
+        pass
 
-        # List of all column names
-        cols = existing.columns.tolist()
-        print(cols)
-        # Normalize columns to handle " Teacher " vs "teacher"
-        existing.columns = [str(col).strip().lower() for col in existing.columns]
-        return existing
-    except Exception as e:
-        # If Sheets fails, try backup file
-        try:
-            if os.path.exists("validations_backup.csv"):
-                df = pd.read_csv("validations_backup.csv")
-                df.columns = [str(col).strip().lower() for col in df.columns]
-                return df
-        except:
-            pass
-        return pd.DataFrame() # Return empty DF if all else fails
+    # 2. Try local backup CSV
+    try:
+        if os.path.exists("validations_backup.csv"):
+            df = pd.read_csv("validations_backup.csv")
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            return df
+    except Exception:
+        pass
+
+    # 3. Give up gracefully
+    return pd.DataFrame()
+
 
 # ─── SESSION STATE ───
 if "teacher_name" not in st.session_state:
     st.session_state.teacher_name = ""
 if "force_new" not in st.session_state:
-    st.session_state.force_new = False   # set True when teacher chooses to edit/override
+    st.session_state.force_new = False
 
-# ─── SIDEBAR: TEACHER LOGIN ───
+# ─── SIDEBAR ───
 st.sidebar.title("🔐 Teacher Portal")
 teacher_name = st.sidebar.text_input("Enter your name", value=st.session_state.teacher_name)
-
 mode = st.sidebar.radio("Select Mode", ["📝 Validate Questions", "📊 View Results"])
 
 if teacher_name:
@@ -91,34 +84,22 @@ if mode == "📝 Validate Questions":
     # Question selector
     q_ids = questions_df["ID"].tolist()
     selected_q = st.selectbox("Select Question ID", q_ids)
-
     q_row = questions_df[questions_df["ID"] == selected_q].iloc[0]
 
-    # ─── NEW: DUPLICATE CHECK (SAFE FOR EMPTY DATAFRAMES) ───
+    # ─── DUPLICATE CHECK ───
     prior = pd.DataFrame()
     if teacher_name:
         existing = fetch_submissions()
-        
-        # SAFETY CHECK: If existing is empty, skip the check
-        if not existing.empty:
-            # Ensure columns exist before accessing
-            if "teacher" in existing.columns and "question_id" in existing.columns:
-                prior = existing[
-                    (existing["teacher"] == teacher_name) &
-                    (existing["question_id"] == selected_q)
-                ]
-            else:
-                # Columns missing (maybe bad data), treat as no prior submission
-                st.warning("Warning: Could not read submission history due to data format issues.")
-                prior = pd.DataFrame()
-        else:
-            prior = pd.DataFrame()
+        if not existing.empty and "teacher" in existing.columns and "question_id" in existing.columns:
+            prior = existing[
+                (existing["teacher"] == teacher_name) &
+                (existing["question_id"] == selected_q)
+            ]
+
     editing_allowed = st.session_state.force_new
+
     if not prior.empty and not editing_allowed:
-        st.warning(
-            f"⚠️ You have already validated **{selected_q}** "
-            f"({len(prior)} submission(s)). Showing your prior review below."
-        )
+        st.warning(f"⚠️ You have already validated **{selected_q}**. Showing your prior review below.")
         prev = prior.iloc[-1]
         st.markdown(
             f"**Your prior submission** ({prev.get('timestamp', 'n/a')}):  \n"
@@ -140,7 +121,7 @@ if mode == "📝 Validate Questions":
             st.session_state.force_new = False
             st.rerun()
 
-    # Display question details
+    # ─── DISPLAY QUESTION ───
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -153,8 +134,7 @@ if mode == "📝 Validate Questions":
     st.markdown(f"**Question ({selected_q}):** {q_row['Question']}")
 
     st.markdown("**Options:**")
-    options = {"A": q_row["A"], "B": q_row["B"],
-               "C": q_row["C"], "D": q_row["D"]}
+    options = {"A": q_row["A"], "B": q_row["B"], "C": q_row["C"], "D": q_row["D"]}
     for key, val in options.items():
         marker = " ✅" if key == q_row["Answer"] else ""
         st.markdown(f"- **{key}.** {val}{marker}")
@@ -164,34 +144,29 @@ if mode == "📝 Validate Questions":
     if pd.notna(q_row["Validation"]):
         st.warning(f"**Existing Flag:** {q_row['Validation']}")
 
-    # Rating form
+    # ─── EVALUATION FORM ───
     st.markdown("---")
     st.subheader("📋 Evaluation Form")
 
     col_a, col_b = st.columns(2)
     with col_a:
         tech_accuracy = st.slider("Technical Accuracy", 1, 5, 3,
-                                   help="Is the answer correct? Is the explanation accurate?")
+                                  help="Is the answer correct? Is the explanation accurate?")
         bloom_align = st.slider("Bloom Alignment", 1, 5, 3,
                                 help="Does the cognitive level match the Bloom category?")
         clarity = st.slider("Question Clarity", 1, 5, 3,
-                           help="Is the question unambiguous?")
-
+                            help="Is the question unambiguous?")
     with col_b:
         distractor = st.slider("Distractor Quality", 1, 5, 3,
-                              help="Are wrong answers plausible?")
+                               help="Are wrong answers plausible?")
         curriculum = st.slider("Curriculum Fit", 1, 5, 3,
-                              help="Is this relevant to the curriculum?")
+                               help="Is this relevant to the curriculum?")
         overall = st.slider("Overall Suitability", 1, 5, 3,
-                           help="Holistic assessment")
+                            help="Holistic assessment")
 
-    # Decision
+    # ─── DECISION ───
     st.markdown("---")
-    decision = st.radio(
-        "Decision",
-        ["✅ Accept", "⚠️ Revise", "❌ Reject"],
-        horizontal=True
-    )
+    decision = st.radio("Decision", ["✅ Accept", "⚠️ Revise", "❌ Reject"], horizontal=True)
 
     selected_reasons = []
     if decision != "✅ Accept":
@@ -210,25 +185,25 @@ if mode == "📝 Validate Questions":
             if st.checkbox("Poor distractors"): selected_reasons.append("Poor distractors")
             if st.checkbox("Other"): selected_reasons.append("Other")
 
-    correction = st.text_area("Suggested Correction",
-                               placeholder="Describe the fix needed...")
+    correction = st.text_area("Suggested Correction", placeholder="Describe the fix needed...")
 
-    # Submit
+    # ─── SUBMIT ───
     if st.button("Submit Validation", type="primary"):
         if not teacher_name:
             st.error("Please enter your name in the sidebar.")
         else:
-            # ─── NEW: FINAL DUPLICATE GUARD (bypassed only when editing) ───
+            # Final duplicate guard (bypassed only when editing)
             fresh = fetch_submissions()
             if not st.session_state.force_new and not fresh.empty:
-                dup = fresh[
-                    (fresh["teacher"] == teacher_name) &
-                    (fresh["question_id"] == selected_q)
-                ]
-                if not dup.empty:
-                    st.error(f"You have already submitted a validation for {selected_q}. "
-                             "Use 'Edit / re-submit' above if you want to update it.")
-                    st.stop()
+                if "teacher" in fresh.columns and "question_id" in fresh.columns:
+                    dup = fresh[
+                        (fresh["teacher"] == teacher_name) &
+                        (fresh["question_id"] == selected_q)
+                    ]
+                    if not dup.empty:
+                        st.error(f"You have already submitted a validation for {selected_q}. "
+                                 "Use 'Edit / re-submit' above if you want to update it.")
+                        st.stop()
 
             submission = [
                 datetime.now().isoformat(),
@@ -246,22 +221,29 @@ if mode == "📝 Validate Questions":
                 " | ".join(selected_reasons),
                 correction
             ]
+
+            submission_columns = [
+                "timestamp", "teacher", "question_id", "topic", "bloom",
+                "accuracy", "bloom_align", "clarity", "distractor",
+                "curriculum", "overall", "decision", "reasons", "correction"
+            ]
+
             try:
                 sheet = init_sheet()
                 sheet.append_row(submission)
-                st.session_state.force_new = False   # reset after successful edit
-                st.cache_data.clear()                # refresh cache so the check sees the new row
+                st.session_state.force_new = False
+                st.cache_data.clear()
                 st.success(f"✅ Validation for {selected_q} submitted successfully!")
                 st.balloons()
             except Exception as e:
-                st.error(f"Error saving: {e}")
+                st.error(f"Error saving to Google Sheets: {e}")
                 st.info("Data saved locally as fallback.")
-                pd.DataFrame([submission], columns=[
-                    "timestamp", "teacher", "question_id", "topic", "bloom",
-                    "accuracy", "bloom_align", "clarity", "distractor",
-                    "curriculum", "overall", "decision", "reasons", "correction"
-                ]).to_csv("validations_backup.csv", mode="a",
-                          header=False, index=False)
+                try:
+                    pd.DataFrame([submission], columns=submission_columns).to_csv(
+                        "validations_backup.csv", mode="a", header=False, index=False
+                    )
+                except Exception as e2:
+                    st.error(f"Fallback save also failed: {e2}")
 
 # ═══════════════════════════════════════════
 # MODE 2: VIEW RESULTS DASHBOARD
@@ -269,62 +251,72 @@ if mode == "📝 Validate Questions":
 elif mode == "📊 View Results":
     st.title("📊 Validation Results Dashboard")
 
-    try:
-        results_df = fetch_submissions()
-    except Exception:
-        st.warning("No validation data yet.")
-        st.stop()
+    results_df = fetch_submissions()
 
     if results_df.empty:
         st.info("No validations submitted yet.")
         st.stop()
 
-    rating_cols = ["accuracy", "bloom_align", "clarity",
-                   "distractor", "curriculum", "overall"]
+    rating_cols = ["accuracy", "bloom_align", "clarity", "distractor", "curriculum", "overall"]
     for col in rating_cols:
         if col in results_df.columns:
             results_df[col] = pd.to_numeric(results_df[col], errors="coerce")
 
-    # KPI Summary
     st.markdown("### Summary Statistics")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Submissions", len(results_df))
     with col2:
-        st.metric("Questions Reviewed", results_df["question_id"].nunique())
+        st.metric("Questions Reviewed", results_df["question_id"].nunique() if "question_id" in results_df.columns else 0)
     with col3:
-        st.metric("Teachers Participated", results_df["teacher"].nunique())
+        st.metric("Teachers Participated", results_df["teacher"].nunique() if "teacher" in results_df.columns else 0)
     with col4:
-        accept_rate = (results_df["decision"] == "✅ Accept").mean() * 100
+        if "decision" in results_df.columns:
+            accept_rate = (results_df["decision"] == "✅ Accept").mean() * 100
+        else:
+            accept_rate = 0
         st.metric("Accept Rate", f"{accept_rate:.0f}%")
 
     st.markdown("### Average Ratings by Criterion")
-    avg_ratings = results_df[rating_cols].mean().reset_index()
-    avg_ratings.columns = ["Criterion", "Average Score"]
-
-    import plotly.express as px
-    fig = px.bar(avg_ratings, x="Criterion", y="Average Score",
-                range_y=[0, 5], color="Criterion",
-                title="Average Scores Across All Questions")
-    st.plotly_chart(fig, use_container_width=True)
+    available_rating_cols = [c for c in rating_cols if c in results_df.columns]
+    if available_rating_cols:
+        avg_ratings = results_df[available_rating_cols].mean().reset_index()
+        avg_ratings.columns = ["Criterion", "Average Score"]
+        import plotly.express as px
+        fig = px.bar(avg_ratings, x="Criterion", y="Average Score",
+                     range_y=[0, 5], color="Criterion",
+                     title="Average Scores Across All Questions")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No rating data found in submissions.")
 
     st.markdown("### Per-Question Breakdown")
-    question_summary = results_df.groupby("question_id")[rating_cols].mean()
-    st.dataframe(question_summary.style.highlight_low(axis=1, props="color:red"))
+    if "question_id" in results_df.columns and available_rating_cols:
+        question_summary = results_df.groupby("question_id")[available_rating_cols].mean()
+        st.dataframe(question_summary.style.highlight_low(axis=1, props="color:red"))
+    else:
+        st.info("Insufficient data for per-question breakdown.")
 
     st.markdown("### Rejection Pattern Analysis")
-    rejected = results_df[results_df["decision"] != "✅ Accept"]
-    if not rejected.empty:
+    if "decision" in results_df.columns:
+        rejected = results_df[results_df["decision"] != "✅ Accept"]
+    else:
+        rejected = pd.DataFrame()
+
+    if not rejected.empty and "reasons" in rejected.columns:
         all_reasons = []
         for r in rejected["reasons"].dropna():
             all_reasons.extend([x.strip() for x in r.split("|")])
         if all_reasons:
             reason_counts = pd.Series(all_reasons).value_counts()
+            import plotly.express as px
             fig2 = px.bar(x=reason_counts.values, y=reason_counts.index,
-                         orientation="h", color=reason_counts.values,
-                         title="Rejection Reason Frequency",
-                         labels={"x": "Count", "y": "Reason"})
+                          orientation="h", color=reason_counts.values,
+                          title="Rejection Reason Frequency",
+                          labels={"x": "Count", "y": "Reason"})
             st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("No rejections to analyse yet.")
 
     st.markdown("### Export Data")
     csv = results_df.to_csv(index=False).encode()
