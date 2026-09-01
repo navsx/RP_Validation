@@ -1264,7 +1264,6 @@ elif mode == "🔐 Admin Dashboard":
                 reason_counts,
                 use_container_width=True
             )
-            )
         else:
             st.info(
                 "No reason codes recorded yet."
