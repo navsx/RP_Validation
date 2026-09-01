@@ -1203,7 +1203,6 @@ elif mode == "🔐 Admin Dashboard":
             average_ratings,
             use_container_width=True
         )
-        )
     # ========================================================
     # PER QUESTION SUMMARY
     # ========================================================
