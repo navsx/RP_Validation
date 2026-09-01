@@ -32,9 +32,14 @@ def fetch_submissions():
         sheet = init_sheet()
         data = sheet.get_all_records()
         if not data:
+            print("No Data Found")
             return pd.DataFrame() # Return empty DF if no data
         
         existing = pd.DataFrame(data)
+
+        # List of all column names
+        cols = existing.columns.tolist()
+        print(cols)
         # Normalize columns to handle " Teacher " vs "teacher"
         existing.columns = [str(col).strip().lower() for col in existing.columns]
         return existing
