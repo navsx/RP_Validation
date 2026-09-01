@@ -29,7 +29,14 @@ def init_sheet():
 def fetch_submissions():
     try:
         sheet = init_sheet()
-        return pd.DataFrame(sheet.get_all_records())
+        data = sheet.get_all_records()
+        existing = pd.DataFrame(data)
+        
+        # --- DEBUGGING: PRINT COLUMN NAMES ---
+        st.write("DEBUG: Columns found:", existing.columns.tolist()) 
+        # -------------------------------------
+        
+        return existing
     except Exception:
         try:
             return pd.read_csv("validations_backup.csv")
