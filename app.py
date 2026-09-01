@@ -1,323 +1,2373 @@
-# app.py
+# ============================================================
+# RP1 MCQ VALIDATION PORTAL
+# Teacher Validation + Admin Dashboard
+# ============================================================
+
 import os
+import re
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ─── PAGE CONFIG ───
-st.set_page_config(page_title="MCQ Validation Portal", page_icon="📝", layout="wide")
 
-# ─── LOAD MCQ DATA ───
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="MCQ Validation Portal",
+    page_icon="📝",
+    layout="wide"
+)
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Replace placeholder names before the actual validation study.
+# Rater IDs should remain stable across sessions.
+
+APPROVED_RATERS = {
+    "R01": "Approved Rater 01",
+    "R02": "Approved Rater 02",
+    "R03": "Approved Rater 03",
+    "R04": "Approved Rater 04",
+    "R05": "Approved Rater 05",
+}
+
+
+# Structured issue taxonomy
+
+REASON_CODES = {
+    "WRONG_KEY": "Wrong answer key",
+    "EXPLANATION_ERROR": "Explanation error",
+    "BLOOM_MISMATCH": "Bloom-level mismatch",
+    "CLARITY": "Clarity / ambiguous wording",
+    "DISTRACTOR": "Distractor quality problem",
+    "CURRICULUM": "Curriculum mismatch",
+    "MULTIPLE_VALID_ANSWERS": "Multiple valid answers",
+    "DIFFICULTY": "Inappropriate difficulty",
+    "OTHER": "Other",
+}
+
+
+RATING_COLUMNS = [
+    "accuracy",
+    "bloom_align",
+    "clarity",
+    "distractor",
+    "curriculum",
+    "overall",
+]
+
+
+SUBMISSION_COLUMNS = [
+    "timestamp",
+
+    "rater_id",
+    "rater_name",
+    "school",
+
+    "question_id",
+
+    # Research/admin metadata
+    "topic",
+    "question_type",
+    "bloom",
+
+    # Independent solving
+    "teacher_answer",
+    "answer_key",
+    "answer_agreement",
+
+    # Ratings
+    "accuracy",
+    "bloom_align",
+    "clarity",
+    "distractor",
+    "curriculum",
+    "overall",
+
+    # Decision
+    "decision",
+
+    # Issues/comments
+    "reasons",
+    "correction",
+]
+
+
+# ============================================================
+# LOAD MCQ DATA
+# ============================================================
+
 @st.cache_data
 def load_questions():
+
     df = pd.read_csv("mcq_repository.csv")
+
+    df["ID"] = df["ID"].astype(str)
+
     return df
+
 
 questions_df = load_questions()
 
-# ─── GOOGLE SHEETS CONNECTION ───
+
+# ============================================================
+# GOOGLE SHEETS CONNECTION
+# ============================================================
+
 def init_sheet():
+
     creds_json = st.secrets["gcp_service_account"]
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets"
+    ]
+
+    creds = Credentials.from_service_account_info(
+        creds_json,
+        scopes=scopes
+    )
+
     client = gspread.authorize(creds)
-    return client.open_by_key(st.secrets["sheet_id"]).sheet1
 
-# ─── FETCH EXISTING SUBMISSIONS ───
-@st.cache_data(ttl=60)
+    return client.open_by_key(
+        st.secrets["sheet_id"]
+    ).sheet1
+
+
+# ============================================================
+# FETCH EXISTING SUBMISSIONS
+# ============================================================
+
+@st.cache_data(ttl=30)
 def fetch_submissions():
-    """
-    Returns a DataFrame of all existing submissions.
-    Handles empty sheets, missing columns, and connection failures.
-    Always returns a DataFrame (possibly empty). Never crashes.
-    """
-    # 1. Try Google Sheets
+
+    # Try Google Sheets first
+
     try:
+
         sheet = init_sheet()
+
         data = sheet.get_all_records()
-        if not data:
-            return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        return df
-    except Exception:
-        pass
 
-    # 2. Try local backup CSV
-    try:
-        if os.path.exists("validations_backup.csv"):
-            df = pd.read_csv("validations_backup.csv")
-            df.columns = [str(c).strip().lower() for c in df.columns]
+        if data:
+
+            df = pd.DataFrame(data)
+
+            df.columns = [
+                str(column).strip().lower()
+                for column in df.columns
+            ]
+
             return df
+
     except Exception:
         pass
 
-    # 3. Give up gracefully
+
+    # Local CSV fallback
+
+    try:
+
+        if os.path.exists(
+            "validations_backup.csv"
+        ):
+
+            df = pd.read_csv(
+                "validations_backup.csv"
+            )
+
+            df.columns = [
+                str(column).strip().lower()
+                for column in df.columns
+            ]
+
+            return df
+
+    except Exception:
+        pass
+
+
     return pd.DataFrame()
 
 
-# ─── SESSION STATE ───
-if "teacher_name" not in st.session_state:
-    st.session_state.teacher_name = ""
-if "force_new" not in st.session_state:
-    st.session_state.force_new = False
+# ============================================================
+# SAVE SUBMISSION
+# ============================================================
 
-# ─── SIDEBAR ───
-st.sidebar.title("🔐 Teacher Portal")
-teacher_name = st.sidebar.text_input("Enter your name", value=st.session_state.teacher_name)
-mode = st.sidebar.radio("Select Mode", ["📝 Validate Questions", "📊 View Results"])
+def save_submission(submission_dict):
 
-if teacher_name:
-    st.session_state.teacher_name = teacher_name
-else:
-    st.sidebar.warning("Please enter your name to continue.")
+    google_error = ""
 
-# ═══════════════════════════════════════════
-# MODE 1: VALIDATE QUESTIONS
-# ═══════════════════════════════════════════
-if mode == "📝 Validate Questions":
-    st.title("📝 MCQ Validation Portal")
-    st.markdown(f"### Welcome, **{teacher_name}**!")
 
-    # Question selector
-    q_ids = questions_df["ID"].tolist()
-    selected_q = st.selectbox("Select Question ID", q_ids)
-    q_row = questions_df[questions_df["ID"] == selected_q].iloc[0]
+    # --------------------------------------------------------
+    # GOOGLE SHEETS
+    # --------------------------------------------------------
 
-    # ─── DUPLICATE CHECK ───
-    prior = pd.DataFrame()
-    if teacher_name:
-        existing = fetch_submissions()
-        if not existing.empty and "teacher" in existing.columns and "question_id" in existing.columns:
-            prior = existing[
-                (existing["teacher"] == teacher_name) &
-                (existing["question_id"] == selected_q)
-            ]
+    try:
 
-    editing_allowed = st.session_state.force_new
+        sheet = init_sheet()
 
-    if not prior.empty and not editing_allowed:
-        st.warning(f"⚠️ You have already validated **{selected_q}**. Showing your prior review below.")
-        prev = prior.iloc[-1]
-        st.markdown(
-            f"**Your prior submission** ({prev.get('timestamp', 'n/a')}):  \n"
-            f"- Decision: **{prev.get('decision', '—')}**  \n"
-            f"- Accuracy: {prev.get('accuracy', '—')} · Bloom: {prev.get('bloom_align', '—')} · "
-            f"Clarity: {prev.get('clarity', '—')} · Distractor: {prev.get('distractor', '—')} · "
-            f"Curriculum: {prev.get('curriculum', '—')} · Overall: {prev.get('overall', '—')}  \n"
-            f"- Reasons: {prev.get('reasons', '—')}  \n"
-            f"- Correction: {prev.get('correction', '—')}"
+        existing_header = sheet.row_values(1)
+
+
+        # Empty sheet
+
+        if not existing_header:
+
+            sheet.append_row(
+                SUBMISSION_COLUMNS
+            )
+
+            existing_header = (
+                SUBMISSION_COLUMNS.copy()
+            )
+
+
+        # Add missing columns
+
+        missing_columns = [
+
+            column
+
+            for column in SUBMISSION_COLUMNS
+
+            if column not in existing_header
+
+        ]
+
+
+        if missing_columns:
+
+            updated_header = (
+                existing_header
+                + missing_columns
+            )
+
+            sheet.update(
+                "1:1",
+                [updated_header]
+            )
+
+            existing_header = updated_header
+
+
+        # Create row according to
+        # current Google Sheet column order
+
+        row = [
+
+            submission_dict.get(
+                column,
+                ""
+            )
+
+            for column
+            in existing_header
+
+        ]
+
+
+        sheet.append_row(row)
+
+
+        return (
+            True,
+            "Saved successfully."
         )
-        if st.button("🔄 Edit / re-submit this question"):
-            st.session_state.force_new = True
-            st.rerun()
+
+
+    except Exception as error:
+
+        google_error = str(error)
+
+
+    # --------------------------------------------------------
+    # LOCAL CSV FALLBACK
+    # --------------------------------------------------------
+
+    try:
+
+        backup_file = (
+            "validations_backup.csv"
+        )
+
+
+        backup_exists = os.path.exists(
+            backup_file
+        )
+
+
+        backup_df = pd.DataFrame(
+            [submission_dict]
+        )
+
+
+        backup_df = backup_df.reindex(
+            columns=SUBMISSION_COLUMNS
+        )
+
+
+        backup_df.to_csv(
+
+            backup_file,
+
+            mode="a",
+
+            header=not backup_exists,
+
+            index=False
+
+        )
+
+
+        return (
+
+            True,
+
+            "Google Sheets was unavailable. "
+            "Your response was saved locally."
+
+        )
+
+
+    except Exception as backup_error:
+
+        return (
+
+            False,
+
+            "Could not save your response.\n\n"
+            f"Google Sheets error: "
+            f"{google_error}\n\n"
+            f"Backup error: "
+            f"{backup_error}"
+
+        )
+
+
+# ============================================================
+# CODE RENDERING
+# ============================================================
+
+def render_text_with_code(text):
+
+    """
+    Renders normal text normally and content between:
+
+    {{CODE}}
+    ...
+    {{/CODE}}
+
+    as a Python code block.
+    """
+
+    if pd.isna(text):
+
+        return
+
+
+    text = str(text)
+
+
+    # Convert literal \n into real line breaks
+
+    text = text.replace(
+        "\\n",
+        "\n"
+    )
+
+
+    pattern = (
+        r"\{\{CODE\}\}"
+        r"(.*?)"
+        r"\{\{/CODE\}\}"
+    )
+
+
+    parts = re.split(
+        pattern,
+        text,
+        flags=re.DOTALL
+    )
+
+
+    for index, part in enumerate(parts):
+
+        # Normal text
+
+        if index % 2 == 0:
+
+            if part.strip():
+
+                st.markdown(
+                    part.strip()
+                )
+
+
+        # Code block
+
+        else:
+
+            st.code(
+
+                part.strip(),
+
+                language="python"
+
+            )
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def get_question_row(question_id):
+
+    return questions_df[
+        questions_df["ID"] == question_id
+    ].iloc[0]
+
+
+def get_rater_submissions(
+    submissions_df,
+    rater_id
+):
+
+    if submissions_df.empty:
+
+        return pd.DataFrame()
+
+
+    if (
+        "rater_id"
+        not in submissions_df.columns
+    ):
+
+        return pd.DataFrame()
+
+
+    return submissions_df[
+
+        submissions_df[
+            "rater_id"
+        ].astype(str)
+
+        == str(rater_id)
+
+    ]
+
+
+def get_completed_questions(
+    submissions_df,
+    rater_id
+):
+
+    rater_data = (
+        get_rater_submissions(
+            submissions_df,
+            rater_id
+        )
+    )
+
+
+    if rater_data.empty:
+
+        return set()
+
+
+    if (
+        "question_id"
+        not in rater_data.columns
+    ):
+
+        return set()
+
+
+    return set(
+
+        rater_data[
+            "question_id"
+        ].astype(str).tolist()
+
+    )
+
+
+def reset_question_form():
+
+    keys_to_remove = [
+
+        "teacher_answer",
+
+        "accuracy",
+        "bloom_align",
+        "clarity",
+        "distractor",
+        "curriculum",
+        "overall",
+
+        "decision",
+
+        "reason_codes",
+
+        "correction",
+
+        "confirm_defaults",
+
+    ]
+
+
+    for key in keys_to_remove:
+
+        if key in st.session_state:
+
+            del st.session_state[key]
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "selected_question" not in st.session_state:
+
+    st.session_state.selected_question = None
+
+
+if "submitted_question" not in st.session_state:
+
+    st.session_state.submitted_question = None
+
+
+if "submitted_result" not in st.session_state:
+
+    st.session_state.submitted_result = None
+
+
+if "reveal_answer" not in st.session_state:
+
+    st.session_state.reveal_answer = False
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title(
+    "📝 MCQ Validation Study"
+)
+
+
+st.sidebar.markdown(
+    "---"
+)
+
+
+# ============================================================
+# RATER IDENTIFICATION
+# ============================================================
+
+rater_id = st.sidebar.selectbox(
+
+    "Rater ID",
+
+    options=[
+        ""
+    ]
+    + list(APPROVED_RATERS.keys()),
+
+    format_func=lambda value:
+
+        "Select your Rater ID"
+
+        if value == ""
+
+        else (
+            f"{value} — "
+            f"{APPROVED_RATERS[value]}"
+        )
+
+)
+
+
+# ============================================================
+# SCHOOL
+# ============================================================
+
+school = st.sidebar.text_input(
+
+    "School / Institution",
+
+    placeholder=(
+        "Enter your school or institution"
+    )
+
+)
+
+
+# ============================================================
+# MODE
+# ============================================================
+
+mode_options = [
+
+    "📝 Validate Questions"
+
+]
+
+
+admin_password = None
+
+
+try:
+
+    admin_password = st.secrets.get(
+        "ADMIN_PASSWORD",
+        None
+    )
+
+except Exception:
+
+    pass
+
+
+if admin_password:
+
+    mode_options.append(
+        "🔐 Admin Dashboard"
+    )
+
+
+mode = st.sidebar.radio(
+
+    "Mode",
+
+    mode_options
+
+)
+
+
+# ============================================================
+# TEACHER VALIDATION MODE
+# ============================================================
+
+if mode == "📝 Validate Questions":
+
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    st.title(
+        "MCQ Validation Study"
+    )
+
+
+    st.markdown(
+
+        """
+        Please independently review each multiple-choice question.
+
+        **Workflow:**  
+        **Step 1:** Select the answer you believe is correct  
+        → **Step 2:** Evaluate the item  
+        → **Step 3:** Submit your decision
+
+        The official answer and explanation will only become
+        available after your evaluation has been submitted.
+        """
+
+    )
+
+
+    # ========================================================
+    # REQUIRE RATER
+    # ========================================================
+
+    if not rater_id:
+
+        st.info(
+
+            "Please select your Rater ID "
+            "from the sidebar to begin."
+
+        )
+
         st.stop()
 
-    if editing_allowed:
-        st.info("You are editing an existing submission — a new row will be recorded with a later timestamp.")
-        if st.button("↩️ Cancel edit"):
-            st.session_state.force_new = False
-            st.rerun()
 
-    # ─── DISPLAY QUESTION ───
+    # ========================================================
+    # REQUIRE SCHOOL
+    # ========================================================
+
+    if not school.strip():
+
+        st.info(
+
+            "Please enter your School / Institution "
+            "in the sidebar to begin."
+
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # LOAD EXISTING DATA
+    # ========================================================
+
+    submissions_df = (
+        fetch_submissions()
+    )
+
+
+    completed_questions = (
+        get_completed_questions(
+            submissions_df,
+            rater_id
+        )
+    )
+
+
+    all_question_ids = (
+        questions_df["ID"]
+        .astype(str)
+        .tolist()
+    )
+
+
+    remaining_questions = [
+
+        question_id
+
+        for question_id
+        in all_question_ids
+
+        if question_id
+        not in completed_questions
+
+    ]
+
+
+    total_questions = len(
+        all_question_ids
+    )
+
+
+    completed_count = len(
+        completed_questions
+    )
+
+
+    remaining_count = len(
+        remaining_questions
+    )
+
+
+    # ========================================================
+    # PROGRESS
+    # ========================================================
+
     st.markdown("---")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Topic", q_row["Topic"])
-    with col2:
-        st.metric("Question Type", q_row["Question Type"])
-    with col3:
-        st.metric("Bloom Level", q_row["Bloom"])
 
-    st.markdown(f"**Question ({selected_q}):** {q_row['Question']}")
 
-    st.markdown("**Options:**")
-    options = {"A": q_row["A"], "B": q_row["B"], "C": q_row["C"], "D": q_row["D"]}
-    for key, val in options.items():
-        marker = " ✅" if key == q_row["Answer"] else ""
-        st.markdown(f"- **{key}.** {val}{marker}")
+    progress = (
 
-    st.markdown(f"**Recorded Answer:** {q_row['Answer']}")
-    st.info(f"**Explanation:** {q_row['Explanation']}")
-    if pd.notna(q_row["Validation"]):
-        st.warning(f"**Existing Flag:** {q_row['Validation']}")
+        completed_count
+        / total_questions
 
-    # ─── EVALUATION FORM ───
+        if total_questions > 0
+
+        else 0
+
+    )
+
+
+    progress_col1, progress_col2 = (
+        st.columns([5, 1])
+    )
+
+
+    with progress_col1:
+
+        st.progress(progress)
+
+
+    with progress_col2:
+
+        st.metric(
+
+            "Progress",
+
+            f"{completed_count}/{total_questions}"
+
+        )
+
+
+    st.caption(
+
+        f"{completed_count} completed "
+        f"· {remaining_count} remaining"
+
+    )
+
+
+    # ========================================================
+    # ALL COMPLETED
+    # ========================================================
+
+    if not remaining_questions:
+
+        st.success(
+
+            "You have completed all available "
+            "questions. Thank you for your participation."
+
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # SELECT CURRENT QUESTION
+    # ========================================================
+
+    if (
+
+        st.session_state.selected_question
+        not in remaining_questions
+
+    ):
+
+        st.session_state.selected_question = (
+            remaining_questions[0]
+        )
+
+
+    selected_q = (
+        st.session_state.selected_question
+    )
+
+
+    q_row = get_question_row(
+        selected_q
+    )
+
+
+    question_number = (
+
+        all_question_ids.index(
+            selected_q
+        )
+
+        + 1
+
+    )
+
+
+    # ========================================================
+    # QUESTION HEADER
+    # ========================================================
+
     st.markdown("---")
-    st.subheader("📋 Evaluation Form")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        tech_accuracy = st.slider("Technical Accuracy", 1, 5, 3,
-                                  help="Is the answer correct? Is the explanation accurate?")
-        bloom_align = st.slider("Bloom Alignment", 1, 5, 3,
-                                help="Does the cognitive level match the Bloom category?")
-        clarity = st.slider("Question Clarity", 1, 5, 3,
-                            help="Is the question unambiguous?")
-    with col_b:
-        distractor = st.slider("Distractor Quality", 1, 5, 3,
-                               help="Are wrong answers plausible?")
-        curriculum = st.slider("Curriculum Fit", 1, 5, 3,
-                               help="Is this relevant to the curriculum?")
-        overall = st.slider("Overall Suitability", 1, 5, 3,
-                            help="Holistic assessment")
 
-    # ─── DECISION ───
+    st.subheader(
+
+        f"Question {question_number} "
+        f"of {total_questions}"
+
+    )
+
+
+    # ========================================================
+    # POST-SUBMISSION VIEW
+    # ========================================================
+
+    if (
+
+        st.session_state.submitted_question
+        == selected_q
+
+        and
+        st.session_state.submitted_result
+        is not None
+
+    ):
+
+
+        result = (
+            st.session_state.submitted_result
+        )
+
+
+        st.success(
+            "Your evaluation has been recorded."
+        )
+
+
+        st.markdown(
+
+            f"**Your Answer:** "
+            f"`{result['teacher_answer']}`"
+
+        )
+
+
+        # ----------------------------------------------------
+        # REVEAL ANSWER
+        # ----------------------------------------------------
+
+        if not st.session_state.reveal_answer:
+
+
+            if st.button(
+
+                "Reveal Answer & Explanation"
+
+            ):
+
+                st.session_state.reveal_answer = True
+
+                st.rerun()
+
+
+        # ----------------------------------------------------
+        # DISPLAY ANSWER AFTER REVEAL
+        # ----------------------------------------------------
+
+        if st.session_state.reveal_answer:
+
+
+            st.markdown("---")
+
+
+            st.subheader(
+                "Answer & Explanation"
+            )
+
+
+            st.markdown(
+
+                f"**Recorded Answer Key:** "
+                f"`{result['answer_key']}`"
+
+            )
+
+
+            if (
+
+                result[
+                    "answer_agreement"
+                ]
+                == "AGREE"
+
+            ):
+
+                st.success(
+
+                    "Your answer matches "
+                    "the recorded answer key."
+
+                )
+
+
+            elif (
+
+                result[
+                    "answer_agreement"
+                ]
+                == "DISAGREE"
+
+            ):
+
+                st.warning(
+
+                    "Your answer does not match "
+                    "the recorded answer key."
+
+                )
+
+
+            else:
+
+                st.info(
+
+                    "You selected Unsure."
+
+                )
+
+
+            st.markdown(
+                "**Explanation:**"
+            )
+
+
+            render_text_with_code(
+                q_row["Explanation"]
+            )
+
+
+        # ----------------------------------------------------
+        # NEXT QUESTION
+        # ----------------------------------------------------
+
+        st.markdown("---")
+
+
+        _, next_col = st.columns(
+            [3, 2]
+        )
+
+
+        with next_col:
+
+
+            if st.button(
+
+                "Next Unrated Question →",
+
+                type="primary",
+
+                use_container_width=True
+
+            ):
+
+
+                st.cache_data.clear()
+
+
+                fresh_submissions = (
+                    fetch_submissions()
+                )
+
+
+                completed_questions = (
+                    get_completed_questions(
+
+                        fresh_submissions,
+
+                        rater_id
+
+                    )
+                )
+
+
+                new_remaining = [
+
+                    question_id
+
+                    for question_id
+                    in all_question_ids
+
+                    if question_id
+                    not in completed_questions
+
+                ]
+
+
+                if new_remaining:
+
+                    st.session_state.selected_question = (
+                        new_remaining[0]
+                    )
+
+
+                    st.session_state.submitted_question = (
+                        None
+                    )
+
+
+                    st.session_state.submitted_result = (
+                        None
+                    )
+
+
+                    st.session_state.reveal_answer = (
+                        False
+                    )
+
+
+                    reset_question_form()
+
+
+                    st.rerun()
+
+
+                else:
+
+                    st.success(
+                        "All questions completed."
+                    )
+
+
+        st.stop()
+
+
+    # ========================================================
+    # QUESTION CARD
+    # ========================================================
+
+    with st.container(border=True):
+
+        render_text_with_code(
+            q_row["Question"]
+        )
+
+
+    # ========================================================
+    # OPTIONS
+    # ========================================================
+
+    st.markdown(
+        "### Answer Options"
+    )
+
+
+    options = {
+
+        "A": q_row["A"],
+        "B": q_row["B"],
+        "C": q_row["C"],
+        "D": q_row["D"],
+
+    }
+
+
+    option_labels = []
+
+
+    answer_lookup = {}
+
+
+    for letter, option_text in options.items():
+
+        label = f"{letter}"
+
+
+        option_labels.append(
+            label
+        )
+
+
+        answer_lookup[label] = letter
+
+
+    # ========================================================
+    # STEP 1
+    # ========================================================
+
     st.markdown("---")
-    decision = st.radio("Decision", ["✅ Accept", "⚠️ Revise", "❌ Reject"], horizontal=True)
+
+
+    st.subheader(
+        "Step 1 — Your Independent Answer"
+    )
+
+
+    st.caption(
+
+        "First select the answer you believe "
+        "is correct."
+
+    )
+
+
+    selected_answer = st.radio(
+
+        "Your Answer",
+
+        options=[
+            "A",
+            "B",
+            "C",
+            "D",
+            "Unsure"
+        ],
+
+        index=None,
+
+        horizontal=True,
+
+        key="teacher_answer"
+
+    )
+
+
+    # Display options clearly
+
+    for letter, option_text in options.items():
+
+        with st.container(border=True):
+
+            st.markdown(
+                f"**{letter}.**"
+            )
+
+
+            render_text_with_code(
+                option_text
+            )
+
+
+    # ========================================================
+    # STEP 2
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.subheader(
+        "Step 2 — Item Evaluation"
+    )
+
+
+    st.caption(
+
+        "Rating guide: "
+        "**1 = Poor · 2 = Weak · "
+        "3 = Acceptable · 4 = Good · "
+        "5 = Excellent**"
+
+    )
+
+
+    rating_col1, rating_col2 = (
+        st.columns(2)
+    )
+
+
+    with rating_col1:
+
+
+        tech_accuracy = st.slider(
+
+            "Technical Accuracy",
+
+            min_value=1,
+
+            max_value=5,
+
+            value=3,
+
+            key="accuracy",
+
+            help=(
+                "Is the question, answer structure, "
+                "and underlying content technically sound?"
+            )
+
+        )
+
+
+        bloom_align = st.slider(
+
+            "Cognitive-Level Appropriateness",
+
+            min_value=1,
+
+            max_value=5,
+
+            value=3,
+
+            key="bloom_align",
+
+            help=(
+                "Does the question appear to require "
+                "an appropriate level of cognitive processing?"
+            )
+
+        )
+
+
+        clarity = st.slider(
+
+            "Question Clarity",
+
+            min_value=1,
+
+            max_value=5,
+
+            value=3,
+
+            key="clarity",
+
+            help=(
+                "Is the wording clear and unambiguous?"
+            )
+
+        )
+
+
+    with rating_col2:
+
+
+        distractor = st.slider(
+
+            "Distractor Quality",
+
+            min_value=1,
+
+            max_value=5,
+
+            value=3,
+
+            key="distractor",
+
+            help=(
+                "Are the incorrect options plausible "
+                "and meaningful?"
+            )
+
+        )
+
+
+        curriculum = st.slider(
+
+            "Curriculum Fit",
+
+            min_value=1,
+
+            max_value=5,
+
+            value=3,
+
+            key="curriculum",
+
+            help=(
+                "Is the item relevant to the intended "
+                "curriculum?"
+            )
+
+        )
+
+
+        overall = st.slider(
+
+            "Overall Suitability",
+
+            min_value=1,
+
+            max_value=5,
+
+            value=3,
+
+            key="overall",
+
+            help=(
+                "Overall suitability of the item "
+                "for the intended assessment."
+            )
+
+        )
+
+
+    # ========================================================
+    # STEP 3
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.subheader(
+        "Step 3 — Final Decision"
+    )
+
+
+    decision = st.selectbox(
+
+        "Select your decision",
+
+        options=[
+            "",
+            "ACCEPT",
+            "REVISE",
+            "REJECT"
+        ],
+
+        format_func=lambda value:
+
+            "Select a decision..."
+
+            if value == ""
+
+            else value.title(),
+
+        key="decision"
+
+    )
+
+
+    # ========================================================
+    # REASON CODES
+    # ========================================================
 
     selected_reasons = []
-    if decision != "✅ Accept":
-        st.markdown("#### Reason Codes (select all that apply)")
-        col_r1, col_r2, col_r3 = st.columns(3)
-        with col_r1:
-            if st.checkbox("Wrong answer key"): selected_reasons.append("Wrong answer key")
-            if st.checkbox("Explanation error"): selected_reasons.append("Explanation error")
-            if st.checkbox("Bloom misclassification"): selected_reasons.append("Bloom misclassification")
-        with col_r2:
-            if st.checkbox("Ambiguous wording"): selected_reasons.append("Ambiguous wording")
-            if st.checkbox("Multiple valid answers"): selected_reasons.append("Multiple valid answers")
-            if st.checkbox("Outdated content"): selected_reasons.append("Outdated/incorrect content")
-        with col_r3:
-            if st.checkbox("Too easy/hard"): selected_reasons.append("Too easy/too hard")
-            if st.checkbox("Poor distractors"): selected_reasons.append("Poor distractors")
-            if st.checkbox("Other"): selected_reasons.append("Other")
 
-    correction = st.text_area("Suggested Correction", placeholder="Describe the fix needed...")
 
-    # ─── SUBMIT ───
-    if st.button("Submit Validation", type="primary"):
-        if not teacher_name:
-            st.error("Please enter your name in the sidebar.")
+    if decision in [
+        "REVISE",
+        "REJECT"
+    ]:
+
+
+        st.markdown(
+            "#### Issue / Reason Codes"
+        )
+
+
+        st.caption(
+            "Select all that apply."
+        )
+
+
+        selected_reasons = (
+            st.multiselect(
+
+                "Issue Type(s)",
+
+                options=list(
+                    REASON_CODES.keys()
+                ),
+
+                format_func=lambda value:
+
+                    (
+                        f"{value} — "
+                        f"{REASON_CODES[value]}"
+                    ),
+
+                key="reason_codes"
+
+            )
+        )
+
+
+    # ========================================================
+    # COMMENTS
+    # ========================================================
+
+    correction = st.text_area(
+
+        "Suggested Correction / Comments",
+
+        placeholder=(
+            "Optional: Describe the problem "
+            "or suggest an improvement."
+        ),
+
+        key="correction"
+
+    )
+
+
+    # ========================================================
+    # DEFAULT RATING CHECK
+    # ========================================================
+
+    ratings = [
+
+        tech_accuracy,
+        bloom_align,
+        clarity,
+        distractor,
+        curriculum,
+        overall,
+
+    ]
+
+
+    all_default = all(
+
+        rating == 3
+
+        for rating in ratings
+
+    )
+
+
+    if all_default:
+
+
+        confirm_defaults = st.checkbox(
+
+            "I confirm that leaving all six ratings "
+            "at 3 reflects my independent judgment.",
+
+            key="confirm_defaults"
+
+        )
+
+
+    else:
+
+        confirm_defaults = True
+
+
+    # ========================================================
+    # SUBMIT BUTTON
+    # ========================================================
+
+    st.markdown("---")
+
+
+    submit_disabled = (
+
+        selected_answer is None
+
+        or decision == ""
+
+        or not confirm_defaults
+
+    )
+
+
+    submit_clicked = st.button(
+
+        "Submit Independent Evaluation",
+
+        type="primary",
+
+        use_container_width=True,
+
+        disabled=submit_disabled
+
+    )
+
+
+    # ========================================================
+    # SUBMISSION
+    # ========================================================
+
+    if submit_clicked:
+
+
+        # ----------------------------------------------------
+        # FRESH DUPLICATE CHECK
+        # ----------------------------------------------------
+
+        fresh_submissions = (
+            fetch_submissions()
+        )
+
+
+        completed_now = (
+            get_completed_questions(
+
+                fresh_submissions,
+
+                rater_id
+
+            )
+        )
+
+
+        if selected_q in completed_now:
+
+
+            st.error(
+
+                "This question has already been "
+                "submitted under this Rater ID."
+
+            )
+
+
+            st.stop()
+
+
+        # ----------------------------------------------------
+        # TEACHER ANSWER
+        # ----------------------------------------------------
+
+        if selected_answer == "Unsure":
+
+            teacher_answer = "UNSURE"
+
         else:
-            # Final duplicate guard (bypassed only when editing)
-            fresh = fetch_submissions()
-            if not st.session_state.force_new and not fresh.empty:
-                if "teacher" in fresh.columns and "question_id" in fresh.columns:
-                    dup = fresh[
-                        (fresh["teacher"] == teacher_name) &
-                        (fresh["question_id"] == selected_q)
-                    ]
-                    if not dup.empty:
-                        st.error(f"You have already submitted a validation for {selected_q}. "
-                                 "Use 'Edit / re-submit' above if you want to update it.")
-                        st.stop()
 
-            submission = [
+            teacher_answer = selected_answer
+
+
+        # ----------------------------------------------------
+        # ANSWER KEY
+        # ----------------------------------------------------
+
+        answer_key = str(
+            q_row["Answer"]
+        ).strip()
+
+
+        # ----------------------------------------------------
+        # AGREEMENT
+        # ----------------------------------------------------
+
+        if teacher_answer == "UNSURE":
+
+            answer_agreement = "UNSURE"
+
+
+        elif teacher_answer == answer_key:
+
+            answer_agreement = "AGREE"
+
+
+        else:
+
+            answer_agreement = "DISAGREE"
+
+
+        # ----------------------------------------------------
+        # CREATE SUBMISSION
+        # ----------------------------------------------------
+
+        submission_dict = {
+
+
+            "timestamp":
+
                 datetime.now().isoformat(),
-                teacher_name,
+
+
+            "rater_id":
+
+                rater_id,
+
+
+            "rater_name":
+
+                APPROVED_RATERS[
+                    rater_id
+                ],
+
+
+            "school":
+
+                school.strip(),
+
+
+            "question_id":
+
                 selected_q,
+
+
+            # Research metadata
+
+            "topic":
+
                 q_row["Topic"],
+
+
+            "question_type":
+
+                q_row[
+                    "Question Type"
+                ],
+
+
+            "bloom":
+
                 q_row["Bloom"],
-                str(tech_accuracy),
-                str(bloom_align),
-                str(clarity),
-                str(distractor),
-                str(curriculum),
-                str(overall),
+
+
+            # Independent answer
+
+            "teacher_answer":
+
+                teacher_answer,
+
+
+            "answer_key":
+
+                answer_key,
+
+
+            "answer_agreement":
+
+                answer_agreement,
+
+
+            # Ratings
+
+            "accuracy":
+
+                tech_accuracy,
+
+
+            "bloom_align":
+
+                bloom_align,
+
+
+            "clarity":
+
+                clarity,
+
+
+            "distractor":
+
+                distractor,
+
+
+            "curriculum":
+
+                curriculum,
+
+
+            "overall":
+
+                overall,
+
+
+            # Decision
+
+            "decision":
+
                 decision,
-                " | ".join(selected_reasons),
-                correction
-            ]
 
-            submission_columns = [
-                "timestamp", "teacher", "question_id", "topic", "bloom",
-                "accuracy", "bloom_align", "clarity", "distractor",
-                "curriculum", "overall", "decision", "reasons", "correction"
-            ]
 
-            try:
-                sheet = init_sheet()
-                sheet.append_row(submission)
-                st.session_state.force_new = False
-                st.cache_data.clear()
-                st.success(f"✅ Validation for {selected_q} submitted successfully!")
-                st.balloons()
-            except Exception as e:
-                st.error(f"Error saving to Google Sheets: {e}")
-                st.info("Data saved locally as fallback.")
-                try:
-                    pd.DataFrame([submission], columns=submission_columns).to_csv(
-                        "validations_backup.csv", mode="a", header=False, index=False
-                    )
-                except Exception as e2:
-                    st.error(f"Fallback save also failed: {e2}")
+            # Issues
 
-# ═══════════════════════════════════════════
-# MODE 2: VIEW RESULTS DASHBOARD
-# ═══════════════════════════════════════════
-elif mode == "📊 View Results":
-    st.title("📊 Validation Results Dashboard")
+            "reasons":
+
+                " | ".join(
+                    selected_reasons
+                ),
+
+
+            "correction":
+
+                correction,
+
+        }
+
+
+        # ----------------------------------------------------
+        # SAVE
+        # ----------------------------------------------------
+
+        success, message = (
+            save_submission(
+                submission_dict
+            )
+        )
+
+
+        if success:
+
+
+            st.cache_data.clear()
+
+
+            st.session_state.submitted_question = (
+                selected_q
+            )
+
+
+            st.session_state.submitted_result = {
+
+                "teacher_answer":
+
+                    teacher_answer,
+
+
+                "answer_key":
+
+                    answer_key,
+
+
+                "answer_agreement":
+
+                    answer_agreement,
+
+            }
+
+
+            st.session_state.reveal_answer = (
+                False
+            )
+
+
+            reset_question_form()
+
+
+            st.rerun()
+
+
+        else:
+
+            st.error(
+                message
+            )
+
+
+# ============================================================
+# ADMIN DASHBOARD
+# ============================================================
+
+elif mode == "🔐 Admin Dashboard":
+
+
+    st.title(
+        "🔐 Administrator Dashboard"
+    )
+
+
+    entered_password = st.text_input(
+
+        "Administrator Password",
+
+        type="password"
+
+    )
+
+
+    if entered_password != admin_password:
+
+
+        st.info(
+
+            "Enter the administrator password "
+            "to access validation results."
+
+        )
+
+
+        st.stop()
+
+
+    # ========================================================
+    # LOAD RESULTS
+    # ========================================================
 
     results_df = fetch_submissions()
 
+
     if results_df.empty:
-        st.info("No validations submitted yet.")
+
+
+        st.info(
+            "No validations submitted yet."
+        )
+
+
         st.stop()
 
-    rating_cols = ["accuracy", "bloom_align", "clarity", "distractor", "curriculum", "overall"]
-    for col in rating_cols:
-        if col in results_df.columns:
-            results_df[col] = pd.to_numeric(results_df[col], errors="coerce")
 
-    st.markdown("### Summary Statistics")
-    col1, col2, col3, col4 = st.columns(4)
+    # ========================================================
+    # CONVERT NUMERIC DATA
+    # ========================================================
+
+    for column in RATING_COLUMNS:
+
+
+        if column in results_df.columns:
+
+
+            results_df[column] = (
+                pd.to_numeric(
+
+                    results_df[column],
+
+                    errors="coerce"
+
+                )
+            )
+
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    st.markdown(
+        "## Summary"
+    )
+
+
+    col1, col2, col3, col4 = (
+        st.columns(4)
+    )
+
+
     with col1:
-        st.metric("Total Submissions", len(results_df))
+
+
+        st.metric(
+
+            "Total Submissions",
+
+            len(results_df)
+
+        )
+
+
     with col2:
-        st.metric("Questions Reviewed", results_df["question_id"].nunique() if "question_id" in results_df.columns else 0)
+
+
+        question_count = (
+
+            results_df[
+                "question_id"
+            ].nunique()
+
+            if "question_id"
+            in results_df.columns
+
+            else 0
+
+        )
+
+
+        st.metric(
+
+            "Questions Reviewed",
+
+            question_count
+
+        )
+
+
     with col3:
-        st.metric("Teachers Participated", results_df["teacher"].nunique() if "teacher" in results_df.columns else 0)
+
+
+        rater_count = (
+
+            results_df[
+                "rater_id"
+            ].nunique()
+
+            if "rater_id"
+            in results_df.columns
+
+            else 0
+
+        )
+
+
+        st.metric(
+
+            "Raters Participated",
+
+            rater_count
+
+        )
+
+
     with col4:
+
+
         if "decision" in results_df.columns:
-            accept_rate = (results_df["decision"] == "✅ Accept").mean() * 100
+
+
+            accept_rate = (
+
+                results_df[
+                    "decision"
+                ]
+
+                .astype(str)
+
+                .str.upper()
+
+                .eq("ACCEPT")
+
+                .mean()
+
+                * 100
+
+            )
+
+
         else:
+
             accept_rate = 0
-        st.metric("Accept Rate", f"{accept_rate:.0f}%")
 
-    st.markdown("### Average Ratings by Criterion")
-    available_rating_cols = [c for c in rating_cols if c in results_df.columns]
-    if available_rating_cols:
-        avg_ratings = results_df[available_rating_cols].mean().reset_index()
-        avg_ratings.columns = ["Criterion", "Average Score"]
-        import plotly.express as px
-        fig = px.bar(avg_ratings, x="Criterion", y="Average Score",
-                     range_y=[0, 5], color="Criterion",
-                     title="Average Scores Across All Questions")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No rating data found in submissions.")
 
-    st.markdown("### Per-Question Breakdown")
-    if "question_id" in results_df.columns and available_rating_cols:
-        question_summary = results_df.groupby("question_id")[available_rating_cols].mean()
-        st.dataframe(question_summary.style.highlight_min(axis=1, props="color:red"))
-    else:
-        st.info("Insufficient data for per-question breakdown.")
+        st.metric(
 
-    st.markdown("### Rejection Pattern Analysis")
+            "Accept Rate",
+
+            f"{accept_rate:.0f}%"
+
+        )
+
+
+    # ========================================================
+    # ANSWER AGREEMENT
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Answer-Key Agreement"
+    )
+
+
+    if (
+
+        "answer_agreement"
+        in results_df.columns
+
+    ):
+
+
+        agreement_counts = (
+
+            results_df[
+                "answer_agreement"
+            ]
+
+            .value_counts()
+
+            .reset_index()
+
+        )
+
+
+        agreement_counts.columns = [
+
+            "Agreement",
+
+            "Count"
+
+        ]
+
+
+        st.dataframe(
+
+            agreement_counts,
+
+            use_container_width=True
+
+        )
+
+
+    # ========================================================
+    # AVERAGE RATINGS
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Average Ratings"
+    )
+
+
+    available_ratings = [
+
+        column
+
+        for column
+        in RATING_COLUMNS
+
+        if column
+        in results_df.columns
+
+    ]
+
+
+    if available_ratings:
+
+
+        average_ratings = (
+
+            results_df[
+                available_ratings
+            ]
+
+            .mean()
+
+            .round(2)
+
+            .reset_index()
+
+        )
+
+
+        average_ratings.columns = [
+
+            "Criterion",
+
+            "Average Score"
+
+        ]
+
+
+        st.dataframe(
+
+            average_ratings,
+
+            use_container_width=True
+
+        )
+
+
+        st.bar_chart(
+
+            average_ratings.set_index(
+                "Criterion"
+            )
+
+        )
+
+
+    # ========================================================
+    # DECISION DISTRIBUTION
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Decision Distribution"
+    )
+
+
     if "decision" in results_df.columns:
-        rejected = results_df[results_df["decision"] != "✅ Accept"]
-    else:
-        rejected = pd.DataFrame()
 
-    if not rejected.empty and "reasons" in rejected.columns:
+
+        decision_counts = (
+
+            results_df[
+                "decision"
+            ]
+
+            .value_counts()
+
+            .reset_index()
+
+        )
+
+
+        decision_counts.columns = [
+
+            "Decision",
+
+            "Count"
+
+        ]
+
+
+        st.dataframe(
+
+            decision_counts,
+
+            use_container_width=True
+
+        )
+
+
+        st.bar_chart(
+
+            decision_counts.set_index(
+                "Decision"
+            )
+
+        )
+
+
+    # ========================================================
+    # PER QUESTION SUMMARY
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Per-Question Breakdown"
+    )
+
+
+    if available_ratings:
+
+
+        question_summary = (
+
+            results_df
+
+            .groupby(
+                "question_id"
+            )
+
+            [available_ratings]
+
+            .mean()
+
+            .round(2)
+
+        )
+
+
+        st.dataframe(
+
+            question_summary,
+
+            use_container_width=True
+
+        )
+
+
+    # ========================================================
+    # REASON CODE ANALYSIS
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Issue / Reason Code Analysis"
+    )
+
+
+    if "reasons" in results_df.columns:
+
+
         all_reasons = []
-        for r in rejected["reasons"].dropna():
-            all_reasons.extend([x.strip() for x in r.split("|")])
-        if all_reasons:
-            reason_counts = pd.Series(all_reasons).value_counts()
-            import plotly.express as px
-            fig2 = px.bar(x=reason_counts.values, y=reason_counts.index,
-                          orientation="h", color=reason_counts.values,
-                          title="Rejection Reason Frequency",
-                          labels={"x": "Count", "y": "Reason"})
-            st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.info("No rejections to analyse yet.")
 
-    st.markdown("### Export Data")
-    csv = results_df.to_csv(index=False).encode()
-    st.download_button("⬇️ Download CSV", csv, "validations.csv", "text/csv")
+
+        for reason_text in (
+
+            results_df[
+                "reasons"
+            ]
+
+            .dropna()
+
+        ):
+
+
+            reason_list = [
+
+                item.strip()
+
+                for item
+                in str(reason_text).split("|")
+
+                if item.strip()
+
+            ]
+
+
+            all_reasons.extend(
+                reason_list
+            )
+
+
+        if all_reasons:
+
+
+            reason_counts = (
+
+                pd.Series(
+                    all_reasons
+                )
+
+                .value_counts()
+
+                .reset_index()
+
+            )
+
+
+            reason_counts.columns = [
+
+                "Reason Code",
+
+                "Count"
+
+            ]
+
+
+            st.dataframe(
+
+                reason_counts,
+
+                use_container_width=True
+
+            )
+
+
+            st.bar_chart(
+
+                reason_counts.set_index(
+                    "Reason Code"
+                )
+
+            )
+
+
+        else:
+
+
+            st.info(
+                "No reason codes recorded yet."
+            )
+
+
+    # ========================================================
+    # RAW DATA
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Raw Validation Data"
+    )
+
+
+    st.dataframe(
+
+        results_df,
+
+        use_container_width=True
+
+    )
+
+
+    # ========================================================
+    # CSV EXPORT
+    # ========================================================
+
+    st.markdown("---")
+
+
+    st.markdown(
+        "## Export"
+    )
+
+
+    csv_data = (
+
+        results_df
+
+        .to_csv(
+            index=False
+        )
+
+        .encode("utf-8")
+
+    )
+
+
+    st.download_button(
+
+        "⬇️ Download Validation CSV",
+
+        csv_data,
+
+        "rp1_validation_results.csv",
+
+        "text/csv",
+
+        use_container_width=True
+
+    )
