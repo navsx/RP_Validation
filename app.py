@@ -6,9 +6,6 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-st.write("🔍 Secret keys visible:", list(st.secrets.keys()))
-st.write("🔍 sheet_id =", st.secrets.get("sheet_id", "NOT FOUND"))
-
 # ─── PAGE CONFIG ───
 st.set_page_config(page_title="MCQ Validation Portal", page_icon="📝", layout="wide")
 
