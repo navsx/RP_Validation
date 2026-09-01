@@ -1175,10 +1175,6 @@ elif mode == "🔐 Admin Dashboard":
             average_ratings,
             use_container_width=True
         )
-        st.bar_chart(
-            average_ratings.set_index(
-                "Criterion"
-            )
         )
     # ========================================================
     # DECISION DISTRIBUTION
@@ -1203,10 +1199,11 @@ elif mode == "🔐 Admin Dashboard":
             decision_counts,
             use_container_width=True
         )
-        st.bar_chart(
-            decision_counts.set_index(
-                "Decision"
-            )
+
+        st.dataframe(
+            average_ratings,
+            use_container_width=True
+        )
         )
     # ========================================================
     # PER QUESTION SUMMARY
@@ -1269,10 +1266,6 @@ elif mode == "🔐 Admin Dashboard":
                 reason_counts,
                 use_container_width=True
             )
-            st.bar_chart(
-                reason_counts.set_index(
-                    "Reason Code"
-                )
             )
         else:
             st.info(
