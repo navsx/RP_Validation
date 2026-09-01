@@ -31,8 +31,18 @@ def fetch_submissions():
     try:
         sheet = init_sheet()
         data = sheet.get_all_records()
+        sheet_headers = sheet.row_values(1)          # what the sheet actually has
+        data = sheet.get_all_records()
+        st.write("🔍 Raw Row 1:", sheet_headers)
+        st.write("🔍 Number of records:", len(data))
+        existing = pd.DataFrame(data)
+        st.write("🔍 DataFrame columns:", existing.columns.tolist())
+        existing.columns = [str(c).strip().lower() for c in existing.columns]
+        return existing
+    except Exception as e:
+        st.write("🔍Went straight to Exception")
         if not data:
-            print("No Data Found")
+            st.write("No Data Found")
             return pd.DataFrame() # Return empty DF if no data
         
         existing = pd.DataFrame(data)
