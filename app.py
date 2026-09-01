@@ -1,4 +1,5 @@
 # app.py
+import os
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -29,24 +30,24 @@ def init_sheet():
 def fetch_submissions():
     try:
         sheet = init_sheet()
-        # get_all_records() returns a list of dicts. 
-        # Sometimes headers have spaces or different casing.
         data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame() # Return empty DF if no data
+        
         existing = pd.DataFrame(data)
-        
-        # CRITICAL FIX: Normalize all column names to lowercase and strip whitespace
-        # This handles " Teacher ", "TEACHER", "teacher", etc.
+        # Normalize columns to handle " Teacher " vs "teacher"
         existing.columns = [str(col).strip().lower() for col in existing.columns]
-        
         return existing
-    except Exception:
+    except Exception as e:
+        # If Sheets fails, try backup file
         try:
-            df = pd.read_csv("validations_backup.csv")
-            # Also normalize backup CSV columns just in case
-            df.columns = [str(col).strip().lower() for col in df.columns]
-            return df
-        except Exception:
-            return pd.DataFrame()
+            if os.path.exists("validations_backup.csv"):
+                df = pd.read_csv("validations_backup.csv")
+                df.columns = [str(col).strip().lower() for col in df.columns]
+                return df
+        except:
+            pass
+        return pd.DataFrame() # Return empty DF if all else fails
 
 # ─── SESSION STATE ───
 if "teacher_name" not in st.session_state:
@@ -78,16 +79,25 @@ if mode == "📝 Validate Questions":
 
     q_row = questions_df[questions_df["ID"] == selected_q].iloc[0]
 
-    # ─── NEW: DUPLICATE CHECK ───
+    # ─── NEW: DUPLICATE CHECK (SAFE FOR EMPTY DATAFRAMES) ───
     prior = pd.DataFrame()
     if teacher_name:
         existing = fetch_submissions()
+        
+        # SAFETY CHECK: If existing is empty, skip the check
         if not existing.empty:
-            prior = existing[
-                (existing["teacher"] == teacher_name) &
-                (existing["question_id"] == selected_q)
-            ]
-
+            # Ensure columns exist before accessing
+            if "teacher" in existing.columns and "question_id" in existing.columns:
+                prior = existing[
+                    (existing["teacher"] == teacher_name) &
+                    (existing["question_id"] == selected_q)
+                ]
+            else:
+                # Columns missing (maybe bad data), treat as no prior submission
+                st.warning("Warning: Could not read submission history due to data format issues.")
+                prior = pd.DataFrame()
+        else:
+            prior = pd.DataFrame()
     editing_allowed = st.session_state.force_new
     if not prior.empty and not editing_allowed:
         st.warning(
