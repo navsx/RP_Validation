@@ -166,8 +166,8 @@ def save_submission(submission_dict):
                 + missing_columns
             )
             sheet.update(
-                "1:1",
-                [updated_header]
+                range_name="1:1",
+                values=[updated_header]
             )
             existing_header = updated_header
         # Create row according to
