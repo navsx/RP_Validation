@@ -29,17 +29,22 @@ def init_sheet():
 def fetch_submissions():
     try:
         sheet = init_sheet()
+        # get_all_records() returns a list of dicts. 
+        # Sometimes headers have spaces or different casing.
         data = sheet.get_all_records()
         existing = pd.DataFrame(data)
         
-        # --- DEBUGGING: PRINT COLUMN NAMES ---
-        st.write("DEBUG: Columns found:", existing.columns.tolist()) 
-        # -------------------------------------
+        # CRITICAL FIX: Normalize all column names to lowercase and strip whitespace
+        # This handles " Teacher ", "TEACHER", "teacher", etc.
+        existing.columns = [str(col).strip().lower() for col in existing.columns]
         
         return existing
     except Exception:
         try:
-            return pd.read_csv("validations_backup.csv")
+            df = pd.read_csv("validations_backup.csv")
+            # Also normalize backup CSV columns just in case
+            df.columns = [str(col).strip().lower() for col in df.columns]
+            return df
         except Exception:
             return pd.DataFrame()
 
