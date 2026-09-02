@@ -172,152 +172,188 @@ def init_sheet():
 # ============================================================
 @st.cache_data(ttl=20)
 def fetch_submissions():
-    try:
-        sheet = init_sheet()
-        data = (
-            sheet.get_all_records()
-        )
-        if data:
-            df = pd.DataFrame(data)
-            df.columns = [
-                str(column)
-                .strip()
-                .lower()
-                for column
-                in df.columns
-            ]
-            return df
-    except Exception:
-        pass
-    # --------------------------------------------------------
-    # LOCAL BACKUP
-    # --------------------------------------------------------
-    try:
-        if os.path.exists(
-            "validations_backup.csv"
-        ):
-            df = pd.read_csv(
-                "validations_backup.csv"
-            )
-            df.columns = [
-                str(column)
-                .strip()
-                .lower()
-                for column
-                in df.columns
-            ]
-            return df
-    except Exception:
-        pass
-    return pd.DataFrame()
-# ============================================================
-# SAVE SUBMISSION
-# ============================================================
-def save_submission(
-    submission
-):
-    google_error = ""
+    empty_df = pd.DataFrame(columns=SUBMISSION_COLUMNS)
     # --------------------------------------------------------
     # GOOGLE SHEETS
     # --------------------------------------------------------
     try:
         sheet = init_sheet()
-        existing_header = (
-            sheet.row_values(1)
-        )
-        # ----------------------------------------------------
-        # CREATE HEADER
-        # ----------------------------------------------------
-        if not existing_header:
-            sheet.append_row(
-                SUBMISSION_COLUMNS
-            )
-            existing_header = (
-                SUBMISSION_COLUMNS.copy()
-            )
-        # ----------------------------------------------------
-        # ADD NEW COLUMNS IF NECESSARY
-        # ----------------------------------------------------
-        missing_columns = [
-            column
-            for column
-            in SUBMISSION_COLUMNS
-            if column
-            not in existing_header
-        ]
-        if missing_columns:
-            updated_header = (
-                existing_header
-                + missing_columns
-            )
-            sheet.update(
-                range_name="1:1",
-                values=[
-                    updated_header
-                ]
-            )
-            existing_header = (
-                updated_header
-            )
-        # ----------------------------------------------------
-        # CREATE ROW
-        # ----------------------------------------------------
-        row = [
-            submission.get(
-                column,
-                ""
-            )
-            for column
-            in existing_header
-        ]
-        sheet.append_row(
-            row
-        )
-        return (
-            True,
-            "Validation saved successfully."
-        )
-    except Exception as error:
-        google_error = str(error)
+        values = sheet.get_all_values()
+
+        # Empty sheet
+        if not values:
+            return empty_df
+
+        header = [str(column).strip().lower() for column in values[0]]
+
+        # Strict schema check
+        if header != SUBMISSION_COLUMNS:
+            raise ValueError("Google Sheet header does not match ""the required SUBMISSION_COLUMNS schema.")
+
+        # No data rows
+        if len(values) == 1:
+            return empty_df
+
+        df = pd.DataFrame(values[1:],columns=SUBMISSION_COLUMNS)
+
+        return df
+
+    except Exception:
+        pass
+
     # --------------------------------------------------------
     # LOCAL BACKUP
     # --------------------------------------------------------
     try:
+        backup_file = "validations_backup.csv"
+        if os.path.exists(backup_file):
+            df = pd.read_csv(backup_file)
+            df.columns = [str(column).strip().lower() for column in df.columns]
+
+            # Keep only the frozen schema
+            df = df.reindex(
+                columns=SUBMISSION_COLUMNS
+            )
+            return df
+    except Exception:
+        pass
+    return empty_df
+
+# ============================================================
+# SAVE SUBMISSION
+# ============================================================
+
+def save_submission(submission):
+    google_error = ""
+
+    # --------------------------------------------------------
+    # ENSURE STRICT SUBMISSION SCHEMA
+    # --------------------------------------------------------
+    clean_submission = {
+        column: submission.get(column, "")
+        for column in SUBMISSION_COLUMNS
+    }
+    row = [clean_submission[column] for column in SUBMISSION_COLUMNS]
+    # --------------------------------------------------------
+    # GOOGLE SHEETS
+    # --------------------------------------------------------
+    try:
+        sheet = init_sheet()
+        existing_header = sheet.row_values(1)
+        # ----------------------------------------------------
+        # EMPTY SHEET → CREATE HEADER
+        # ----------------------------------------------------
+        if not existing_header:
+            sheet.append_row(SUBMISSION_COLUMNS)
+            existing_header = (
+                SUBMISSION_COLUMNS.copy()
+            )
+
+        # ----------------------------------------------------
+        # STRICT HEADER CHECK
+        # ----------------------------------------------------
+        existing_header = [
+            str(column).strip().lower()
+            for column in existing_header
+        ]
+
+        if existing_header != SUBMISSION_COLUMNS:
+
+            raise ValueError(
+                "Google Sheet schema mismatch. "
+                "Expected exactly: "
+                + ", ".join(SUBMISSION_COLUMNS)
+            )
+
+        # ----------------------------------------------------
+        # SAVE ROW
+        # ----------------------------------------------------
+        sheet.append_row(
+            row
+        )
+
+        return (
+            True,
+            "Validation saved successfully."
+        )
+
+    except Exception as error:
+
+        google_error = str(error)
+
+    # --------------------------------------------------------
+    # LOCAL BACKUP
+    # --------------------------------------------------------
+    try:
+
         backup_file = (
             "validations_backup.csv"
         )
+
         backup_exists = (
-            os.path.exists(
-                backup_file
-            )
+            os.path.exists(backup_file)
         )
+
         backup_df = pd.DataFrame(
-            [submission]
+            [clean_submission],
+            columns=SUBMISSION_COLUMNS
         )
-        backup_df = (
-            backup_df.reindex(
-                columns=SUBMISSION_COLUMNS
+
+        # ----------------------------------------------------
+        # IF BACKUP EXISTS, VERIFY ITS SCHEMA
+        # ----------------------------------------------------
+        if backup_exists:
+
+            existing_backup = pd.read_csv(
+                backup_file,
+                nrows=0
             )
-        )
+
+            existing_columns = [
+                str(column).strip().lower()
+                for column in existing_backup.columns
+            ]
+
+            if existing_columns != SUBMISSION_COLUMNS:
+
+                raise ValueError(
+                    "Backup CSV schema mismatch."
+                )
+
+        # ----------------------------------------------------
+        # SAVE BACKUP
+        # ----------------------------------------------------
         backup_df.to_csv(
+
             backup_file,
+
             mode="a",
+
             header=not backup_exists,
+
             index=False
         )
+
         return (
             True,
             "Google Sheets was unavailable. "
             "Response saved to local backup."
         )
+
     except Exception as error:
+
         return (
+
             False,
+
             "Unable to save validation.\n\n"
+
             f"Google Sheets error: "
             f"{google_error}\n\n"
+
             f"Backup error: {error}"
         )
+
 # ============================================================
 # QUESTION HELPERS
 # ============================================================
