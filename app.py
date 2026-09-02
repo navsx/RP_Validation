@@ -49,43 +49,13 @@ st.markdown(
 # ============================================================
 # VALIDATOR CONFIGURATION
 # ============================================================
-#
-# IMPORTANT:
-#
-# Replace these sample values with actual validators.
-#
-# Passphrases should be unique.
-#
-# Example:
-#
-# "R01": {
-#     "name": "Dr Example Name",
-#     "passphrase": "BlueTiger42"
-# }
-#
-# ============================================================
-VALIDATORS = {
-    "R01": {
-        "name": "Validator 01",
-        "passphrase": "BlueTiger42"
-    },
-    "R02": {
-        "name": "Validator 02",
-        "passphrase": "GreenMango19"
-    },
-    "R03": {
-        "name": "Validator 03",
-        "passphrase": "PurplePython27"
-    },
-    "R04": {
-        "name": "Validator 04",
-        "passphrase": "GoldenCloud42"
-    },
-    "R05": {
-        "name": "Validator 05",
-        "passphrase": "HappyPanda88"
-    }
-}
+def get_validators():
+    try:
+        return st.secrets["validators"]
+    except Exception:
+        return {}
+
+VALIDATORS = get_validators()
 # ============================================================
 # ISSUE TAXONOMY
 # ============================================================
@@ -679,9 +649,6 @@ if not st.session_state.logged_in:
     passphrase = st.text_input(
         "Passphrase",
         type="password"
-    )
-    school = st.text_input(
-        "School / Institution"
     )
     if st.button(
         "Start Validation",
