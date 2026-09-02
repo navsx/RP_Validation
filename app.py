@@ -664,51 +664,24 @@ if not st.session_state.logged_in:
                 "Please enter your passphrase."
             )
             st.stop()
-        if not school.strip():
-            st.error(
-                "Please enter your School / Institution."
-            )
-            st.stop()
         # ----------------------------------------------------
         # VALIDATE PASSPHRASE
         # ----------------------------------------------------
-        expected_passphrase = (
-            VALIDATORS[
-                validator_id
-            ][
-                "passphrase"
-            ]
-        )
+        expected_passphrase = (VALIDATORS[validator_id]["passphrase"])
         if passphrase != expected_passphrase:
-            st.error(
-                "Incorrect passphrase."
-            )
+            st.error("Incorrect passphrase.")
             st.stop()
         # ----------------------------------------------------
         # LOGIN
         # ----------------------------------------------------
-        st.session_state.logged_in = (
-            True
-        )
-        st.session_state.validator_id = (
-            validator_id
-        )
-        st.session_state.validator_name = (
-            VALIDATORS[
-                validator_id
-            ][
-                "name"
-            ]
-        )
-        st.session_state.school = (
-            school.strip()
-        )
+        st.session_state.logged_in = (True)
+        st.session_state.validator_id = (validator_id)
+        st.session_state.validator_name = (VALIDATORS[validator_id]["name"])
+        st.session_state.school = (VALIDATORS[validator_id]["school"])
         # ----------------------------------------------------
         # GET FIRST QUESTION
         # ----------------------------------------------------
-        submissions = (
-            fetch_submissions()
-        )
+        submissions = (fetch_submissions())
         completed = (
             get_completed_questions(
                 submissions,
