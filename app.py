@@ -1157,6 +1157,16 @@ current_question = (
 # ============================================================
 # SUBMITTED QUESTION REVIEW
 # ============================================================
+
+def render_option_line(letter, text):
+    text = "" if pd.isna(text) else str(text)
+    if "{{CODE}}" in text:
+        st.markdown(f"**{letter}.**")
+        render_text_with_code(text)
+    else:
+        st.markdown(f"**{letter}.** {text.replace(chr(92)+'n', ' ').strip()}")
+
+
 if current_question in completed_questions:
     q_row = get_question_row(current_question)
     question_number = (all_question_ids.index(current_question)+ 1)
@@ -1165,9 +1175,10 @@ if current_question in completed_questions:
     render_text_with_code(q_row["Question"])
     st.markdown("### Options")
     for letter in ["A","B","C","D"]:
-        st.markdown(f"**{letter}.**")
-        render_text_with_code(q_row[letter])
+        render_option_line(letter, q_row[letter])
+        
     st.markdown("---")
+    
     own_submission = submissions_df[(submissions_df["validator_id"].astype(str) == str(validator_id)) & (submissions_df["question_id"].astype(str) == str(current_question))]
     if not own_submission.empty:
         row = own_submission.iloc[-1]
@@ -1220,19 +1231,9 @@ st.markdown(
 # ------------------------------------------------------------
 # ACTUAL OPTION TEXT
 # ------------------------------------------------------------
-option_values = [
-    "A",
-    "B",
-    "C",
-    "D"
-]
-def option_format(
-    letter
-):
-    return get_option_display_text(
-        letter,
-        q_row[letter]
-    )
+option_values = ["A","B","C","D"]
+def option_format(letter):
+    return get_option_display_text(letter,q_row[letter])
 # ============================================================
 # STAGE 1
 # ============================================================
