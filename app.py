@@ -1158,43 +1158,28 @@ current_question = (
 # SUBMITTED QUESTION REVIEW
 # ============================================================
 if current_question in completed_questions:
-    q_row = get_question_row(
-        current_question
-    )
-    question_number = (
-        all_question_ids.index(
-            current_question
-        )
-        + 1
-    )
-    st.info(
-        "This question has already been submitted and is locked."
-    )
-    st.subheader(
-        f"Question {question_number}"
-    )
-    render_text_with_code(
-        q_row["Question"]
-    )
-    st.markdown(
-        "### Options"
-    )
-    for letter in [
-        "A",
-        "B",
-        "C",
-        "D"
-    ]:
-        st.markdown(
-            f"**{letter}.**"
-        )
-        render_text_with_code(
-            q_row[letter]
-        )
+    q_row = get_question_row(current_question)
+    question_number = (all_question_ids.index(current_question)+ 1)
+    st.info("This question has already been submitted and is locked.")
+    st.subheader(f"Question {question_number}")
+    render_text_with_code(q_row["Question"])
+    st.markdown("### Options")
+    for letter in ["A","B","C","D"]:
+        st.markdown(f"**{letter}.**")
+        render_text_with_code(q_row[letter])
+    st.markdown("---")
+    own_submission = submissions_df[(submissions_df["validator_id"].astype(str) == str(validator_id)) & (submissions_df["question_id"].astype(str) == str(current_question))]
+    if not own_submission.empty:
+        row = own_submission.iloc[-1]
+        st.markdown(f"**Your answer:** `{row['teacher_answer']}` · **Decision:** {row['decision']}")
+        st.markdown(f"Accuracy {row['technical_accuracy']} · Bloom {row['bloom_alignment']} · "
+                    f"Clarity {row['clarity']} · Distractor {row['distractor_quality']} · "
+                    f"Curriculum {row['curriculum_fit']} · Overall {row['overall_suitability']}")
+    if str(row.get("reason_codes", "")).strip():
+        st.markdown(f"**Issues:** {row['reason_codes']}")
     st.markdown("---")
     st.success(
-        "Submitted validation is locked."
-    )
+        "Submitted validation is locked.")
     st.stop()
 # ============================================================
 # CURRENT QUESTION DATA
@@ -1214,6 +1199,10 @@ question_number = (
 st.subheader(
     f"Question {question_number} "
     f"of {total_questions}"
+)
+st.caption(
+    f"**Topic:** {q_row['Topic']}  ·  **Question Type:** {q_row['Question Type']}  ·  "
+    f"**Target Bloom Level:** {q_row['Bloom']}"
 )
 # ============================================================
 # QUESTION
