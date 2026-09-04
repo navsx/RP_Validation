@@ -135,6 +135,54 @@ def render_options(question: pd.Series) -> None:
             st.markdown(f"**{letter}.** {html.escape(option)}")
 
 
+def render_revealed_options(question: pd.Series, validator_answer: str, system_answer: str) -> None:
+    """Render answer options with an explicit, colour-independent comparison."""
+    for letter in "ABCD":
+        option = question[letter]
+        labels: list[str] = []
+        if validator_answer == system_answer == letter:
+            option_class = "answer-match"
+            labels.append("Validator & system answer")
+        elif letter == validator_answer:
+            option_class = "answer-validator"
+            labels.append("Validator answer")
+        elif letter == system_answer:
+            option_class = "answer-system"
+            labels.append("System answer")
+        else:
+            option_class = "answer-neutral"
+        label_html = " ".join(f'<span class="answer-badge">{label}</span>' for label in labels)
+        st.markdown(
+            f'<div class="answer-option {option_class}"><strong>{letter}.</strong> {label_html}</div>',
+            unsafe_allow_html=True,
+        )
+        if has_code(option):
+            render_text_with_code(option)
+        else:
+            st.markdown(f'<div class="answer-option-text {option_class}">{html.escape(option)}</div>', unsafe_allow_html=True)
+
+
+def set_rating(widget_state_key: str, value: int) -> None:
+    st.session_state[widget_state_key] = value
+
+
+def rating_control(label: str, field: str, question_id: str) -> int:
+    """A slider with one-click 1–5 shortcuts for mouse and touch users."""
+    state_key = widget_key(field, question_id)
+    value = st.slider(label, 1, 5, 1, key=state_key)
+    quick_set = st.columns(5, gap="small")
+    for score, colour in enumerate(("🔴", "🟠", "🟡", "🔵", "🟢"), start=1):
+        quick_set[score - 1].button(
+            f"{score} {colour}",
+            key=widget_key(f"set_{field}_{score}", question_id),
+            on_click=set_rating,
+            args=(state_key, score),
+            use_container_width=True,
+            help=f"Set {label} to {score}",
+        )
+    return value
+
+
 def get_sheet() -> Any:
     """Return the configured worksheet, creating its header if necessary."""
     try:
@@ -213,7 +261,7 @@ def rater_submissions() -> list[dict[str, str]]:
 
 
 def authenticate_rater() -> None:
-    st.title("MCQ Validation")
+    st.subheader("Sign in")
     st.write("Sign in to complete your independent item validation.")
     with st.form("rater_login"):
         rater_id = st.text_input("Rater ID").strip()
@@ -233,7 +281,7 @@ def authenticate_rater() -> None:
 def render_locked_question(question: pd.Series, submission: dict[str, str]) -> None:
     render_question(question)
     st.subheader("Question options")
-    render_options(question)
+    render_revealed_options(question, submission.get("teacher_answer", ""), submission.get("answer_key", ""))
     st.divider()
     st.subheader("Your submitted validation")
     st.write(f"Your answer: **{submission.get('teacher_answer', '')}**")
@@ -273,20 +321,20 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
         return
 
     selected = st.session_state.get(widget_key("committed_answer", question_id))
-    agreement = "AGREE" if selected == question["Answer"].strip() else "DISAGREE"
-    st.markdown("### Your answer and the answer key")
-    render_options(question)
-    st.write(f"Your selected answer: **{selected}**")
-    st.write(f"Correct answer: **{question['Answer']}**")
+    system_answer = question["Answer"].strip()
+    agreement = "AGREE" if selected == system_answer else "DISAGREE"
+    st.markdown("### Answer review")
+    render_revealed_options(question, selected, system_answer)
     render_text_with_code(question["Explanation"])
     st.write(f"Your answer-key agreement: **{agreement}**")
 
     st.markdown("### Item validation")
+    st.caption("Click the slider track or use the coloured 1–5 buttons to set a rating instantly.")
     ratings: dict[str, int] = {}
     left, right = st.columns(2)
     for index, (field, label) in enumerate(RATING_FIELDS):
         with (left if index < 3 else right):
-            ratings[field] = st.slider(label, 1, 5, 1, key=widget_key(field, question_id))
+            ratings[field] = rating_control(label, field, question_id)
 
     st.markdown("### Final decision")
     decision = st.radio(
@@ -315,7 +363,7 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
             "school": rater["school"],
             "question_type": question["Question Type"],
             "teacher_answer": selected,
-            "answer_key": question["Answer"].strip(),
+            "answer_key": system_answer,
             "answer_agreement": agreement,
             "validator_id": rater["id"],
             "validator_name": rater["name"],
@@ -342,8 +390,9 @@ def rater_portal() -> None:
         return
     questions = get_questions()
     rater = st.session_state.rater
-    st.title("MCQ Validation")
-    st.caption(f"Signed in as {rater['name']} · {rater['school']}")
+    st.sidebar.markdown(f"**{rater['name']}**")
+    st.sidebar.caption(rater["school"])
+    st.sidebar.divider()
     records = rater_submissions()
     own_records = [row for row in records if str(row.get("validator_id")) == rater["id"]]
     submitted_ids = {str(row.get("question_id")) for row in own_records}
@@ -365,6 +414,11 @@ def rater_portal() -> None:
                 navigate_to(question_id, submitted_ids)
                 st.rerun()
 
+    if len(submitted_ids) == len(questions):
+        st.success("Validation complete")
+        st.write(f"All {len(questions)} responses have been recorded. Thank you for your validation work.")
+        return
+
     current = questions.loc[questions["ID"] == st.session_state.current_question_id].iloc[0]
     locked = matching_submission(own_records, rater["id"], current["ID"])
     if locked:
@@ -372,8 +426,43 @@ def rater_portal() -> None:
     else:
         render_open_question(current, rater, submitted_ids)
 
-    if len(submitted_ids) == len(questions):
-        st.success("All questions are complete. Thank you for your validation work.")
+
+def render_admin_validator_progress(data: pd.DataFrame) -> None:
+    """Show a selected rater's completion grid without hiding dashboard totals."""
+    questions = get_questions()
+    question_ids = questions["ID"].tolist()
+    configured = st.secrets.get("validators", {})
+    known_ids = list(configured.keys())
+    known_ids.extend(identifier for identifier in data["validator_id"].dropna().unique() if identifier not in known_ids)
+    if not known_ids:
+        st.caption("No validator records are available yet.")
+        return
+
+    def display_name(identifier: str) -> str:
+        details = configured.get(identifier, {})
+        name = details.get("name", identifier)
+        school = details.get("school", "")
+        return f"{identifier} — {name}" + (f" · {school}" if school else "")
+
+    st.subheader("Validator progress")
+    validator_id = st.selectbox("Select validator", known_ids, format_func=display_name)
+    submitted = set(
+        data.loc[data["validator_id"].eq(validator_id), "question_id"].dropna().astype(str)
+    )
+    complete = len(submitted.intersection(question_ids))
+    st.write(f"**{complete} / {len(question_ids)}** questions submitted")
+    st.caption("✓ submitted · ○ not submitted")
+    for row_start in range(0, len(question_ids), 8):
+        columns = st.columns(8)
+        for index, question_id in enumerate(question_ids[row_start:row_start + 8]):
+            number = row_start + index + 1
+            done = question_id in submitted
+            marker = "✓" if done else "○"
+            status_class = "admin-grid-done" if done else "admin-grid-open"
+            columns[index].markdown(
+                f'<div class="admin-grid {status_class}"><strong>{marker}</strong><br><small>{number}</small></div>',
+                unsafe_allow_html=True,
+            )
 
 
 def admin_portal() -> None:
@@ -389,12 +478,14 @@ def admin_portal() -> None:
     data = pd.DataFrame(fetch_submissions(), columns=SHEET_COLUMNS)
     if data.empty:
         st.info("No submissions yet.")
+        render_admin_validator_progress(data)
         return
     st.metric("Total submissions", len(data))
     metrics = st.columns(3)
     metrics[0].metric("Questions reviewed", data["question_id"].nunique())
     metrics[1].metric("Participating raters", data["validator_id"].nunique())
     metrics[2].metric("Accept rate", f"{(data['decision'].eq('ACCEPT').mean() * 100):.1f}%")
+    render_admin_validator_progress(data)
     st.subheader("Answer-key agreement")
     agreement_counts = (
         data["answer_agreement"].fillna("").replace("", "Not recorded")
@@ -446,12 +537,25 @@ def main() -> None:
             color: #162a3a; font-size: 1.22rem; font-weight: 650;
             line-height: 1.5; margin-bottom: 1rem;
         }
+        .answer-option, .answer-option-text {
+            padding: .45rem .7rem; border-left: 5px solid #aab7c4;
+        }
+        .answer-option { border-radius: .3rem .3rem 0 0; font-size: 1rem; }
+        .answer-option-text { border-radius: 0 0 .3rem .3rem; margin-bottom: .55rem; }
+        .answer-neutral { background: #f6f8fa; color: #263746; }
+        .answer-match { background: #e5f6ea; border-color: #237a42; color: #14532d; }
+        .answer-validator { background: #eee9ff; border-color: #6542b5; color: #3f247e; }
+        .answer-system { background: #fff3d6; border-color: #b7791f; color: #744210; }
+        .answer-badge { font-size: .78rem; font-weight: 700; margin-left: .45rem; }
+        .admin-grid { text-align: center; border-radius: .35rem; padding: .4rem 0; margin: .12rem 0; }
+        .admin-grid-done { background: #e5f6ea; color: #14532d; border: 1px solid #76b58b; }
+        .admin-grid-open { background: #eef2f5; color: #52616d; border: 1px solid #c5d0d8; }
         </style>
         """,
         unsafe_allow_html=True,
     )
     st.sidebar.title("MCQ Validation")
-    page = st.sidebar.radio("View", ["Rater validation", "Admin dashboard"])
+    page = st.sidebar.radio("Navigation", ["Rater validation", "Admin dashboard"], label_visibility="collapsed")
     if page == "Admin dashboard":
         admin_portal()
     else:
