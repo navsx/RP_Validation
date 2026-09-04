@@ -396,19 +396,29 @@ def admin_portal() -> None:
     metrics[1].metric("Participating raters", data["validator_id"].nunique())
     metrics[2].metric("Accept rate", f"{(data['decision'].eq('ACCEPT').mean() * 100):.1f}%")
     st.subheader("Answer-key agreement")
-    st.bar_chart(data["answer_agreement"].value_counts())
+    agreement_counts = (
+        data["answer_agreement"].fillna("").replace("", "Not recorded")
+        .value_counts().rename_axis("agreement").reset_index(name="responses")
+    )
+    st.bar_chart(agreement_counts, x="agreement", y="responses")
     st.subheader("Average rating")
     ratings = data[[field for field, _ in RATING_FIELDS]].apply(pd.to_numeric, errors="coerce").mean()
-    st.bar_chart(ratings)
+    rating_chart = ratings.rename_axis("criterion").reset_index(name="average_rating")
+    st.bar_chart(rating_chart, x="criterion", y="average_rating")
     st.subheader("Decision distribution")
-    st.bar_chart(data["decision"].value_counts())
+    decision_counts = (
+        data["decision"].fillna("").replace("", "Not recorded")
+        .value_counts().rename_axis("decision").reset_index(name="responses")
+    )
+    st.bar_chart(decision_counts, x="decision", y="responses")
     st.subheader("Reason-code frequency")
     reasons = data["reason_codes"].fillna("").str.split(r" \| ").explode()
     reasons = reasons[reasons.ne("")]
     if reasons.empty:
         st.caption("No reason codes have been submitted.")
     else:
-        st.bar_chart(reasons.value_counts())
+        reason_counts = reasons.value_counts().rename_axis("reason_code").reset_index(name="responses")
+        st.bar_chart(reason_counts, x="reason_code", y="responses")
     st.subheader("Per-question average ratings")
     question_scores = data.assign(**{field: pd.to_numeric(data[field], errors="coerce") for field, _ in RATING_FIELDS})
     st.dataframe(question_scores.groupby("question_id")[[field for field, _ in RATING_FIELDS]].mean(), use_container_width=True)
