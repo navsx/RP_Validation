@@ -268,6 +268,15 @@ def rater_submissions() -> list[dict[str, str]]:
     return st.session_state.rater_submissions
 
 
+def sign_out_rater() -> None:
+    """Do not leave a validator identity available after entering Admin."""
+    question_ids = st.session_state.get("question_ids", [])
+    for question_id in question_ids:
+        reset_question_form(question_id)
+    for state_key in ("rater", "rater_submissions", "current_question_id", "question_ids"):
+        st.session_state.pop(state_key, None)
+
+
 def authenticate_rater() -> None:
     st.subheader("Sign in")
     st.write("Sign in to complete your independent item validation.")
@@ -361,6 +370,7 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
     decision = st.radio(
         "Decision", ["ACCEPT", "REVISE", "REJECT"], index=None,
         horizontal=True, key=widget_key("decision", question_id), disabled=not ratings_complete,
+        label_visibility="collapsed",
     )
     if not ratings_complete:
         st.caption("Select a rating for all six criteria to unlock the final decision.")
@@ -573,21 +583,41 @@ def main() -> None:
         .admin-grid { text-align: center; border-radius: .35rem; padding: .4rem 0; margin: .12rem 0; }
         .admin-grid-done { background: #e5f6ea; color: #14532d; border: 1px solid #76b58b; }
         .admin-grid-open { background: #eef2f5; color: #52616d; border: 1px solid #c5d0d8; }
-        .rating-scale { width: 100%; border-collapse: separate; border-spacing: .25rem; margin: .2rem 0 1rem; }
-        .rating-scale th, .rating-scale td { text-align: center; border-radius: .3rem; padding: .3rem; }
+        .rating-scale { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: .2rem; margin: .2rem 0 .75rem; }
+        .rating-scale th, .rating-scale td { width: 20%; text-align: center; border-radius: .3rem; padding: .22rem .15rem; }
         .rating-scale th { color: #27384a; font-size: .9rem; }
-        .rating-scale td { font-size: .78rem; color: #384b5d; }
+        .rating-scale td { font-size: .72rem; color: #384b5d; }
         .rating-scale th:nth-child(1), .rating-scale td:nth-child(1) { background: #fbe9ea; }
         .rating-scale th:nth-child(2), .rating-scale td:nth-child(2) { background: #fff1df; }
         .rating-scale th:nth-child(3), .rating-scale td:nth-child(3) { background: #fff8df; }
         .rating-scale th:nth-child(4), .rating-scale td:nth-child(4) { background: #eaf1fb; }
         .rating-scale th:nth-child(5), .rating-scale td:nth-child(5) { background: #e8f5f1; }
+        div.stButton > button[kind="secondary"] { background: #f3f6f9; border-color: #cbd5df; color: #31495f; }
+        div.stButton > button[kind="secondary"]:hover { filter: brightness(.96); }
+        div.stButton > button[kind="primary"] { background: #496d91; border-color: #3c5c7b; }
+        /* The only five-column button rows in the main panel are rating controls. */
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(1) button[kind="secondary"] { background: #fbe9ea; border-color: #ecc6ca; color: #7d3f47; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(2) button[kind="secondary"] { background: #fff1df; border-color: #efd9b7; color: #805d26; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(3) button[kind="secondary"] { background: #fff8df; border-color: #e8ddb1; color: #76652b; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(4) button[kind="secondary"] { background: #eaf1fb; border-color: #c7d8ee; color: #345b82; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(5) button[kind="secondary"] { background: #e8f5f1; border-color: #bee1d6; color: #28665b; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(1) button[kind="primary"] { background: #ba5c67; border-color: #9d4652; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(2) button[kind="primary"] { background: #bf8744; border-color: #9e6b2f; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(3) button[kind="primary"] { background: #a9933b; border-color: #88762b; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(4) button[kind="primary"] { background: #4d78a8; border-color: #3d6088; }
+        main div[data-testid="stHorizontalBlock"]:has(> div:nth-child(5)):not(:has(> div:nth-child(6))) > div:nth-child(5) button[kind="primary"] { background: #3e8a7b; border-color: #2f6f63; }
         </style>
         """,
         unsafe_allow_html=True,
     )
     st.sidebar.title("MCQ Validation")
     page = st.sidebar.radio("Navigation", ["Rater validation", "Admin dashboard"], label_visibility="collapsed")
+    previous_page = st.session_state.get("active_page")
+    if page == "Admin dashboard" and previous_page == "Rater validation":
+        sign_out_rater()
+    elif page == "Rater validation" and previous_page == "Admin dashboard":
+        st.session_state.pop("admin_unlocked", None)
+    st.session_state.active_page = page
     if page == "Admin dashboard":
         admin_portal()
     else:
