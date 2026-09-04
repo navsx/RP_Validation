@@ -289,8 +289,8 @@ def authenticate_rater() -> None:
         **Curriculum Fit** — does it belong under its labeled topic?\n
         **Overall Suitability** — would you use this with your own students?\n
     
-        **Bloom's Taxonomy** — Remember (recall) · Understand (explain, no execution) ·
-        Apply (use a rule on given data) · Analyse (trace/debug multi-step logic)
+        **Bloom's Taxonomy** — :blue-background[Remember] (recall) · :blue-background[Understand] (explain, no execution) ·
+        :blue-background[Apply] (use a rule on given data) · :blue-background[Analyse] (trace/debug multi-step logic)
         """)
     
     st.write("Sign in to complete your independent item validation.")
