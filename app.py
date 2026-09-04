@@ -282,12 +282,12 @@ def authenticate_rater() -> None:
 
     with st.expander("📋 What you're rating — quick reference"):
         st.markdown("""
-        **Technical Accuracy** — is the question, code, and answer key correct?
-        **Bloom Alignment** — does it require the *labeled* level, not more or less?
-        **Question Clarity** — is the wording unambiguous?
-        **Distractor Quality** — are the wrong options plausible?
-        **Curriculum Fit** — does it belong under its labeled topic?
-        **Overall Suitability** — would you use this with your own students?
+        **Technical Accuracy** — is the question, code, and answer key correct?\n
+        **Bloom Alignment** — does it require the *labeled* level, not more or less?\n
+        **Question Clarity** — is the wording unambiguous?\n
+        **Distractor Quality** — are the wrong options plausible?\n
+        **Curriculum Fit** — does it belong under its labeled topic?\n
+        **Overall Suitability** — would you use this with your own students?\n
     
         **Bloom's Taxonomy** — Remember (recall) · Understand (explain, no execution) ·
         Apply (use a rule on given data) · Analyse (trace/debug multi-step logic)
