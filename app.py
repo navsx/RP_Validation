@@ -1,1684 +1,398 @@
-# ============================================================
-# RP1 MCQ VALIDATION PORTAL
-# ============================================================
-# Teacher Validation Interface
-# + Validator Login
-# + Blind Independent Answer
-# + System Answer Reveal
-# + Item Validation
-# + Question Navigator
-# + Admin Dashboard
-# ============================================================
-import os
+"""RP1 MCQ Validation Portal.
+
+This is a clean implementation of the study protocol.  The question bank is
+read only from ``mcq_repository.csv``; validation submissions are append-only.
+"""
+
+from __future__ import annotations
+
+import csv
+import html
 import re
-from datetime import datetime
-import streamlit as st
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
 import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-st.set_page_config(
-    page_title="RP1 MCQ Validation",
-    page_icon="📝",
-    layout="wide"
-)
-# ============================================================
-# CUSTOM CSS
-# ============================================================
-st.markdown(
-    """
-    <style>
-    .question-card {
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #DDDDDD;
-        margin-bottom: 20px;
-    }
-    .rating-guide {
-        padding: 12px;
-        border-radius: 8px;
-        background-color: #F7F7F7;
-        margin-bottom: 15px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-# ============================================================
-# VALIDATOR CONFIGURATION
-# ============================================================
-def get_validators():
-    try:
-        return st.secrets["validators"]
-    except Exception:
-        return {}
+import streamlit as st
 
-VALIDATORS = get_validators()
-# ============================================================
-# ISSUE TAXONOMY
-# ============================================================
-REASON_CODES = {
-    "WRONG_KEY":
-        "Wrong answer key",
-    "EXPLANATION_ERROR":
-        "Explanation error",
-    "BLOOM_MISMATCH":
-        "Bloom-level mismatch",
-    "CLARITY":
-        "Clarity / ambiguity problem",
-    "DISTRACTOR":
-        "Distractor quality problem",
-    "CURRICULUM":
-        "Curriculum mismatch",
-    "MULTIPLE_VALID_ANSWERS":
-        "Multiple valid answers",
-    "DIFFICULTY":
-        "Inappropriate difficulty",
-    "OTHER":
-        "Other"
-}
-# ============================================================
-# RATING DEFINITIONS
-# ============================================================
-RATING_MEANINGS = {
-    1: "🔴 Major problem",
-    2: "🟠 Significant concern",
-    3: "🟡 Moderate concern",
-    4: "🔵 Minor concern",
-    5: "🟢 No concern"
-}
-RATING_COLUMNS = [
-    "technical_accuracy",
-    "bloom_alignment",
-    "clarity",
-    "distractor_quality",
-    "curriculum_fit",
-    "overall_suitability"
+
+APP_DIR = Path(__file__).parent
+QUESTION_FILE = APP_DIR / "mcq_repository.csv"
+BACKUP_FILE = APP_DIR / "validations_backup.csv"
+
+# Deliberately enumerate only fields safe for the teacher workflow.  The CSV's
+# private researcher-review field is never loaded.
+QUESTION_COLUMNS = [
+    "ID", "Topic", "Question Type", "Bloom", "Question", "A", "B", "C", "D",
+    "Answer", "Explanation",
 ]
-# ============================================================
-# SUBMISSION COLUMNS
-# ============================================================
-SUBMISSION_COLUMNS = [
-    "timestamp",
-    "validator_id",
-    "validator_name",
-    "school",
-    "question_id",
-    "topic",
-    "question_type",
-    "bloom",
-    # Independent answer
-    "teacher_answer",
-    "answer_key",
-    "answer_agreement",
-    # Ratings
-    "technical_accuracy",
-    "bloom_alignment",
-    "clarity",
-    "distractor_quality",
-    "curriculum_fit",
-    "overall_suitability",
-    # Final decision
-    "decision",
-    # Issues
-    "reason_codes",
-    "comments"
+SHEET_COLUMNS = [
+    "timestamp", "question_id", "topic", "bloom", "decision", "school",
+    "question_type", "teacher_answer", "answer_key", "answer_agreement",
+    "validator_id", "validator_name", "technical_accuracy", "clarity",
+    "bloom_alignment", "distractor_quality", "curriculum_fit",
+    "overall_suitability", "reason_codes", "comments",
 ]
-# ============================================================
-# LOAD QUESTION DATA
-# ============================================================
-@st.cache_data
-def load_questions():
-    df = pd.read_csv(
-        "mcq_repository.csv"
-    )
-    df["ID"] = df["ID"].astype(str)
-    return df
-questions_df = load_questions()
-# ============================================================
-# GOOGLE SHEETS CONNECTION
-# ============================================================
-def init_sheet():
-    creds_json = (
-        st.secrets[
-            "gcp_service_account"
-        ]
-    )
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets"
-    ]
-    credentials = (
-        Credentials
-        .from_service_account_info(
-            creds_json,
-            scopes=scopes
-        )
-    )
-    client = (
-        gspread.authorize(
-            credentials
-        )
-    )
-    spreadsheet = (
-        client.open_by_key(
-            st.secrets["sheet_id"]
-        )
-    )
-    return spreadsheet.sheet1
-# ============================================================
-# FETCH SUBMISSIONS
-# ============================================================
-@st.cache_data(ttl=20)
-def fetch_submissions():
-    empty_df = pd.DataFrame(columns=SUBMISSION_COLUMNS)
-    # --------------------------------------------------------
-    # GOOGLE SHEETS
-    # --------------------------------------------------------
-    try:
-        sheet = init_sheet()
-        values = sheet.get_all_values()
-
-        # Empty sheet
-        if not values:
-            return empty_df
-
-        header = [str(column).strip().lower() for column in values[0]]
-
-        # Strict schema check
-        if header != SUBMISSION_COLUMNS:
-            raise ValueError("Google Sheet header does not match ""the required SUBMISSION_COLUMNS schema.")
-
-        # No data rows
-        if len(values) == 1:
-            return empty_df
-
-        df = pd.DataFrame(values[1:],columns=SUBMISSION_COLUMNS)
-
-        return df
-
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # LOCAL BACKUP
-    # --------------------------------------------------------
-    try:
-        backup_file = "validations_backup.csv"
-        if os.path.exists(backup_file):
-            df = pd.read_csv(backup_file)
-            df.columns = [str(column).strip().lower() for column in df.columns]
-
-            # Keep only the frozen schema
-            df = df.reindex(
-                columns=SUBMISSION_COLUMNS
-            )
-            return df
-    except Exception:
-        pass
-    return empty_df
-
-# ============================================================
-# SAVE SUBMISSION
-# ============================================================
-
-def save_submission(submission):
-    google_error = ""
-
-    # --------------------------------------------------------
-    # ENSURE STRICT SUBMISSION SCHEMA
-    # --------------------------------------------------------
-    clean_submission = {
-        column: submission.get(column, "")
-        for column in SUBMISSION_COLUMNS
-    }
-    row = [clean_submission[column] for column in SUBMISSION_COLUMNS]
-    # --------------------------------------------------------
-    # GOOGLE SHEETS
-    # --------------------------------------------------------
-    try:
-        sheet = init_sheet()
-        existing_header = sheet.row_values(1)
-        # ----------------------------------------------------
-        # EMPTY SHEET → CREATE HEADER
-        # ----------------------------------------------------
-        if not existing_header:
-            sheet.append_row(SUBMISSION_COLUMNS)
-            existing_header = (
-                SUBMISSION_COLUMNS.copy()
-            )
-
-        # ----------------------------------------------------
-        # STRICT HEADER CHECK
-        # ----------------------------------------------------
-        existing_header = [
-            str(column).strip().lower()
-            for column in existing_header
-        ]
-
-        if existing_header != SUBMISSION_COLUMNS:
-
-            raise ValueError(
-                "Google Sheet schema mismatch. "
-                "Expected exactly: "
-                + ", ".join(SUBMISSION_COLUMNS)
-            )
-
-        # ----------------------------------------------------
-        # SAVE ROW
-        # ----------------------------------------------------
-        sheet.append_row(
-            row
-        )
-
-        return (
-            True,
-            "Validation saved successfully."
-        )
-
-    except Exception as error:
-
-        google_error = str(error)
-
-    # --------------------------------------------------------
-    # LOCAL BACKUP
-    # --------------------------------------------------------
-    try:
-
-        backup_file = (
-            "validations_backup.csv"
-        )
-
-        backup_exists = (
-            os.path.exists(backup_file)
-        )
-
-        backup_df = pd.DataFrame(
-            [clean_submission],
-            columns=SUBMISSION_COLUMNS
-        )
-
-        # ----------------------------------------------------
-        # IF BACKUP EXISTS, VERIFY ITS SCHEMA
-        # ----------------------------------------------------
-        if backup_exists:
-
-            existing_backup = pd.read_csv(
-                backup_file,
-                nrows=0
-            )
-
-            existing_columns = [
-                str(column).strip().lower()
-                for column in existing_backup.columns
-            ]
-
-            if existing_columns != SUBMISSION_COLUMNS:
-
-                raise ValueError(
-                    "Backup CSV schema mismatch."
-                )
-
-        # ----------------------------------------------------
-        # SAVE BACKUP
-        # ----------------------------------------------------
-        backup_df.to_csv(
-
-            backup_file,
-
-            mode="a",
-
-            header=not backup_exists,
-
-            index=False
-        )
-
-        return (
-            True,
-            "Google Sheets was unavailable. "
-            "Response saved to local backup."
-        )
-
-    except Exception as error:
-
-        return (
-
-            False,
-
-            "Unable to save validation.\n\n"
-
-            f"Google Sheets error: "
-            f"{google_error}\n\n"
-
-            f"Backup error: {error}"
-        )
-
-# ============================================================
-# QUESTION HELPERS
-# ============================================================
-def get_question_row(
-    question_id
-):
-    return (
-        questions_df[
-            questions_df["ID"]
-            == str(question_id)
-        ]
-        .iloc[0]
-    )
-# ============================================================
-# CODE FORMATTING
-# ============================================================
-def clean_code(
-    code
-):
-    if code is None:
-        return ""
-    code = str(code)
-    # Convert literal \n
-    # stored in CSV into real line breaks
-    code = code.replace(
-        "\\n",
-        "\n"
-    )
-    # Convert literal \t
-    code = code.replace(
-        "\\t",
-        "\t"
-    )
-    return code.strip()
-# ============================================================
-# RENDER TEXT WITH CODE
-# ============================================================
-def render_text_with_code(
-    text
-):
-    if pd.isna(text):
-        return
-    text = str(text)
-    # --------------------------------------------------------
-    # Convert literal line breaks
-    # --------------------------------------------------------
-    text = text.replace(
-        "\\n",
-        "\n"
-    )
-    # --------------------------------------------------------
-    # Pattern
-    # --------------------------------------------------------
-    pattern = (
-        r"\{\{CODE\}\}"
-        r"(.*?)"
-        r"\{\{/CODE\}\}"
-    )
-    parts = re.split(
-        pattern,
-        text,
-        flags=re.DOTALL
-    )
-    for index, part in enumerate(parts):
-        # ----------------------------------------------------
-        # NORMAL TEXT
-        # ----------------------------------------------------
-        if index % 2 == 0:
-            if part.strip():
-                st.markdown(
-                    part.strip()
-                )
-        # ----------------------------------------------------
-        # CODE
-        # ----------------------------------------------------
-        else:
-            code = clean_code(
-                part
-            )
-            if code:
-                st.code(
-                    code,
-                    language="python"
-                )
-# ============================================================
-# OPTION DISPLAY TEXT
-# ============================================================
-def get_option_display_text(
-    letter,
-    text
-):
-    text = str(text)
-    text = text.replace(
-        "\\n",
-        "\n"
-    )
-    # Remove code markers for radio labels
-    text = text.replace(
-        "{{CODE}}",
-        ""
-    )
-    text = text.replace(
-        "{{/CODE}}",
-        ""
-    )
-    return (
-        f"{letter}. {text}"
-    )
-# ============================================================
-# SESSION STATE INITIALIZATION
-# ============================================================
-def initialize_session_state():
-    defaults = {
-        "logged_in":
-            False,
-        "validator_id":
-            None,
-        "validator_name":
-            None,
-        "school":
-            None,
-        "current_question":
-            None
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = (
-                value
-            )
-initialize_session_state()
-# ============================================================
-# QUESTION-SPECIFIC KEYS
-# ============================================================
-def key_for(
-    name,
-    question_id
-):
-    return (
-        f"{name}_{question_id}"
-    )
-# ============================================================
-# ANSWER SUBMITTED STATUS
-# ============================================================
-def is_answer_submitted(
-    question_id
-):
-    return (
-        st.session_state.get(
-            key_for(
-                "answer_submitted",
-                question_id
-            ),
-            False
-        )
-    )
-# ============================================================
-# SET ANSWER SUBMITTED
-# ============================================================
-def submit_independent_answer(
-    question_id
-):
-    answer = (
-        st.session_state.get(
-            key_for(
-                "teacher_answer",
-                question_id
-            )
-        )
-    )
-    if answer is None:
-        return False
-    st.session_state[
-        key_for(
-            "answer_submitted",
-            question_id
-        )
-    ] = True
-    return True
-# ============================================================
-# GET COMPLETED QUESTIONS
-# ============================================================
-def get_completed_questions(
-    submissions,
-    validator_id
-):
-    if submissions.empty:
-        return set()
-    if (
-        "validator_id"
-        not in submissions.columns
-    ):
-        return set()
-    if (
-        "question_id"
-        not in submissions.columns
-    ):
-        return set()
-    validator_data = (
-        submissions[
-            submissions[
-                "validator_id"
-            ]
-            .astype(str)
-            == str(validator_id)
-        ]
-    )
-    return set(
-        validator_data[
-            "question_id"
-        ]
-        .astype(str)
-        .tolist()
-    )
-# ============================================================
-# CLEAR QUESTION DRAFT
-# ============================================================
-def clear_question_state(
-    question_id
-):
-    prefixes = [
-        "teacher_answer",
-        "answer_submitted",
-        "technical_accuracy",
-        "bloom_alignment",
-        "clarity",
-        "distractor_quality",
-        "curriculum_fit",
-        "overall_suitability",
-        "decision",
-        "reason_codes",
-        "comments"
-    ]
-    for prefix in prefixes:
-        key = key_for(
-            prefix,
-            question_id
-        )
-        if key in st.session_state:
-            del st.session_state[key]
-# ============================================================
-# GET NEXT UNANSWERED QUESTION
-# ============================================================
-def get_next_unanswered_question(
-    current_question,
-    completed_questions
-):
-    question_ids = (
-        questions_df["ID"]
-        .astype(str)
-        .tolist()
-    )
-    try:
-        current_index = (
-            question_ids.index(
-                str(current_question)
-            )
-        )
-    except ValueError:
-        current_index = -1
-    # --------------------------------------------------------
-    # Search after current question
-    # --------------------------------------------------------
-    for question_id in (
-        question_ids[
-            current_index + 1:
-        ]
-    ):
-        if question_id not in completed_questions:
-            return question_id
-    # --------------------------------------------------------
-    # Search from beginning
-    # --------------------------------------------------------
-    for question_id in question_ids:
-        if question_id not in completed_questions:
-            return question_id
-    return None
-# ============================================================
-# ADMIN PASSWORD
-# ============================================================
-def get_admin_password():
-    try:
-        return st.secrets.get(
-            "ADMIN_PASSWORD",
-            None
-        )
-    except Exception:
-        return None
-# ============================================================
-# SIDEBAR
-# ============================================================
-st.sidebar.title(
-    "📝 RP1 Validation"
-)
-st.sidebar.markdown(
-    "---"
-)
-# ============================================================
-# LOGIN SCREEN
-# ============================================================
-if not st.session_state.logged_in:
-    st.title(
-        "MCQ Teacher Validation Study"
-    )
-    st.markdown(
-        """
-        Please log in using your assigned
-        **Validator ID and passphrase**.
-        You will first independently answer each question.
-        The system answer and explanation will then be shown
-        before you complete the validation.
-        """
-    )
-    st.markdown("---")
-    validator_id = st.selectbox(
-        "Validator ID",
-        options=[
-            ""
-        ]
-        + list(
-            VALIDATORS.keys()
-        ),
-        format_func=lambda value:
-            (
-                "Select Validator ID"
-            )
-            if value == ""
-            else value
-    )
-    passphrase = st.text_input(
-        "Passphrase",
-        type="password"
-    )
-    if st.button(
-        "Start Validation",
-        type="primary"
-    ):
-        if validator_id == "":
-            st.error(
-                "Please select your Validator ID."
-            )
-            st.stop()
-        if not passphrase:
-            st.error(
-                "Please enter your passphrase."
-            )
-            st.stop()
-        # ----------------------------------------------------
-        # VALIDATE PASSPHRASE
-        # ----------------------------------------------------
-        expected_passphrase = (VALIDATORS[validator_id]["passphrase"])
-        if passphrase != expected_passphrase:
-            st.error("Incorrect passphrase.")
-            st.stop()
-        # ----------------------------------------------------
-        # LOGIN
-        # ----------------------------------------------------
-        st.session_state.logged_in = (True)
-        st.session_state.validator_id = (validator_id)
-        st.session_state.validator_name = (VALIDATORS[validator_id]["name"])
-        st.session_state.school = (VALIDATORS[validator_id]["school"])
-        # ----------------------------------------------------
-        # GET FIRST QUESTION
-        # ----------------------------------------------------
-        submissions = (fetch_submissions())
-        completed = (
-            get_completed_questions(
-                submissions,
-                validator_id
-            )
-        )
-        all_questions = (
-            questions_df["ID"]
-            .astype(str)
-            .tolist()
-        )
-        remaining = [
-            question_id
-            for question_id
-            in all_questions
-            if question_id
-            not in completed
-        ]
-        if remaining:
-            st.session_state.current_question = (
-                remaining[0]
-            )
-        st.rerun()
-    st.stop()
-# ============================================================
-# AFTER LOGIN
-# ============================================================
-validator_id = (
-    st.session_state.validator_id
-)
-validator_name = (
-    st.session_state.validator_name
-)
-school = (
-    st.session_state.school
-)
-# ============================================================
-# SIDEBAR GREETING
-# ============================================================
-st.sidebar.success(
-    f"Welcome,\n{validator_name}!"
-)
-st.sidebar.caption(
-    f"Validator: {validator_id}"
-)
-st.sidebar.caption(
-    f"School: {school}"
-)
-st.sidebar.markdown(
-    "---"
-)
-# ============================================================
-# ADMIN ACCESS
-# ============================================================
-admin_password = (
-    get_admin_password()
-)
-mode_options = [
-    "📝 Validation"
+RATING_FIELDS = [
+    ("technical_accuracy", "Technical Accuracy"),
+    ("bloom_alignment", "Bloom Alignment"),
+    ("clarity", "Clarity"),
+    ("distractor_quality", "Distractor Quality"),
+    ("curriculum_fit", "Curriculum Fit"),
+    ("overall_suitability", "Overall Suitability"),
 ]
-if admin_password:
-    mode_options.append(
-        "🔐 Admin"
-    )
-mode = st.sidebar.radio(
-    "Mode",
-    mode_options
-)
-# ============================================================
-# ADMIN DASHBOARD
-# ============================================================
-if mode == "🔐 Admin":
-    st.title(
-        "🔐 Administrator Dashboard"
-    )
-    entered_password = st.text_input(
-        "Administrator Password",
-        type="password"
-    )
-    if entered_password != admin_password:
-        st.info(
-            "Enter the administrator password."
-        )
+REASON_CODES = [
+    "WRONG_KEY", "EXPLANATION_ERROR", "BLOOM_MISMATCH", "CLARITY", "DISTRACTOR",
+    "CURRICULUM", "MULTIPLE_VALID_ANSWERS", "DIFFICULTY", "OTHER",
+]
+CODE_PATTERN = re.compile(r"\{\{CODE\}\}(.*?)\{\{/CODE\}\}", re.DOTALL)
+
+
+def widget_key(field: str, question_id: str) -> str:
+    return f"{field}_{question_id}"
+
+
+def reset_question_form(question_id: str) -> None:
+    """Remove all unsaved state for a question before navigating into it."""
+    fields = ["stage", "teacher_answer", "decision", "reason_codes", "comments"]
+    fields.extend(field for field, _ in RATING_FIELDS)
+    for field in fields:
+        st.session_state.pop(widget_key(field, question_id), None)
+
+
+def navigate_to(question_id: str, submitted_ids: set[str]) -> None:
+    if question_id not in submitted_ids:
+        reset_question_form(question_id)
+    st.session_state.current_question_id = question_id
+
+
+@st.cache_data(show_spinner=False)
+def load_questions(file_stamp: float) -> pd.DataFrame:
+    del file_stamp
+    questions = pd.read_csv(QUESTION_FILE, usecols=QUESTION_COLUMNS, dtype=str).fillna("")
+    missing = set(QUESTION_COLUMNS) - set(questions.columns)
+    if missing:
+        raise ValueError(f"Question file is missing: {', '.join(sorted(missing))}")
+    if questions["ID"].duplicated().any():
+        raise ValueError("Every question ID must be unique.")
+    return questions
+
+
+def get_questions() -> pd.DataFrame:
+    if not QUESTION_FILE.exists():
+        st.error("Add mcq_repository.csv beside app.py before starting the portal.")
         st.stop()
-    results_df = (
-        fetch_submissions()
-    )
-    if results_df.empty:
-        st.info(
-            "No validation responses yet."
-        )
-        st.stop()
-    # ========================================================
-    # SUMMARY
-    # ========================================================
-    st.subheader(
-        "Summary"
-    )
-    col1, col2, col3, col4 = (
-        st.columns(4)
-    )
-    with col1:
-        st.metric(
-            "Total Submissions",
-            len(results_df)
-        )
-    with col2:
-        st.metric(
-            "Questions Reviewed",
-            results_df[
-                "question_id"
-            ].nunique()
-            if "question_id"
-            in results_df.columns
-            else 0
-        )
-    with col3:
-        st.metric(
-            "Validators",
-            results_df[
-                "validator_id"
-            ].nunique()
-            if "validator_id"
-            in results_df.columns
-            else 0
-        )
-    with col4:
-        if (
-            "decision"
-            in results_df.columns
-        ):
-            accept_rate = (
-                results_df[
-                    "decision"
-                ]
-                .astype(str)
-                .str.upper()
-                .eq("ACCEPT")
-                .mean()
-                * 100
-            )
-        else:
-            accept_rate = 0
-        st.metric(
-            "Accept Rate",
-            f"{accept_rate:.1f}%"
-        )
-    # ========================================================
-    # DECISION SUMMARY
-    # ========================================================
-    st.markdown("---")
-    st.subheader(
-        "Decision Distribution"
-    )
-    if (
-        "decision"
-        in results_df.columns
-    ):
-        decision_counts = (
-            results_df[
-                "decision"
-            ]
-            .value_counts()
-            .reset_index()
-        )
-        decision_counts.columns = [
-            "Decision",
-            "Count"
-        ]
-        st.dataframe(
-            decision_counts,
-            use_container_width=True
-        )
-    # ========================================================
-    # ANSWER AGREEMENT
-    # ========================================================
-    st.markdown("---")
-    st.subheader(
-        "Independent Answer Agreement"
-    )
-    if (
-        "answer_agreement"
-        in results_df.columns
-    ):
-        agreement_counts = (
-            results_df[
-                "answer_agreement"
-            ]
-            .value_counts()
-            .reset_index()
-        )
-        agreement_counts.columns = [
-            "Agreement",
-            "Count"
-        ]
-        st.dataframe(
-            agreement_counts,
-            use_container_width=True
-        )
-    # ========================================================
-    # AVERAGE RATINGS
-    # ========================================================
-    st.markdown("---")
-    st.subheader(
-        "Average Ratings"
-    )
-    available_ratings = [
-        column
-        for column
-        in RATING_COLUMNS
-        if column
-        in results_df.columns
-    ]
-    if available_ratings:
-        for column in available_ratings:
-            results_df[column] = (
-                pd.to_numeric(
-                    results_df[column],
-                    errors="coerce"
-                )
-            )
-        averages = (
-            results_df[
-                available_ratings
-            ]
-            .mean()
-            .round(2)
-            .reset_index()
-        )
-        averages.columns = [
-            "Criterion",
-            "Average"
-        ]
-        st.dataframe(
-            averages,
-            use_container_width=True
-        )
-    # ========================================================
-    # REASON CODES
-    # ========================================================
-    st.markdown("---")
-    st.subheader(
-        "Issue Code Summary"
-    )
-    if (
-        "reason_codes"
-        in results_df.columns
-    ):
-        all_codes = []
-        for code_text in (
-            results_df[
-                "reason_codes"
-            ]
-            .dropna()
-        ):
-            codes = [
-                code.strip()
-                for code
-                in str(code_text).split("|")
-                if code.strip()
-            ]
-            all_codes.extend(
-                codes
-            )
-        if all_codes:
-            code_counts = (
-                pd.Series(
-                    all_codes
-                )
-                .value_counts()
-                .reset_index()
-            )
-            code_counts.columns = [
-                "Issue Code",
-                "Count"
-            ]
-            st.dataframe(
-                code_counts,
-                use_container_width=True
-            )
-        else:
-            st.info(
-                "No issue codes recorded yet."
-            )
-    # ========================================================
-    # RAW DATA
-    # ========================================================
-    st.markdown("---")
-    st.subheader(
-        "Raw Validation Data"
-    )
-    st.dataframe(
-        results_df,
-        use_container_width=True
-    )
-    # ========================================================
-    # EXPORT
-    # ========================================================
-    csv_data = (
-        results_df
-        .to_csv(
-            index=False
-        )
-        .encode("utf-8")
-    )
-    st.download_button(
-        "⬇️ Download CSV",
-        csv_data,
-        file_name=(
-            "rp1_validation_results.csv"
-        ),
-        mime="text/csv"
-    )
-    st.stop()
-# ============================================================
-# VALIDATION MODE
-# ============================================================
-st.title(
-    "MCQ Teacher Validation"
-)
-st.caption(
-    "Independent Answer → "
-    "System Answer & Explanation → "
-    "Item Validation"
-)
-# ============================================================
-# LOAD SUBMISSIONS
-# ============================================================
-submissions_df = (
-    fetch_submissions()
-)
-completed_questions = (
-    get_completed_questions(
-        submissions_df,
-        validator_id
-    )
-)
-all_question_ids = (
-    questions_df["ID"]
-    .astype(str)
-    .tolist()
-)
-total_questions = (
-    len(all_question_ids)
-)
-completed_count = (
-    len(completed_questions)
-)
-# ============================================================
-# ALL QUESTIONS COMPLETE
-# ============================================================
-if (
-    completed_count
-    >= total_questions
-):
-    st.success(
-        "🎉 You have completed all questions."
-    )
-    st.stop()
-# ============================================================
-# INITIAL QUESTION
-# ============================================================
-if (
-    st.session_state.current_question
-    is None
-):
-    next_question = (
-        get_next_unanswered_question(
-            None,
-            completed_questions
-        )
-    )
-    st.session_state.current_question = (
-        next_question
-    )
-# ============================================================
-# SIDEBAR PROGRESS
-# ============================================================
-progress = (
-    completed_count
-    / total_questions
-)
-st.sidebar.markdown(
-    "### Progress"
-)
-st.sidebar.progress(
-    progress
-)
-st.sidebar.write(
-    f"**{completed_count} / "
-    f"{total_questions} completed**"
-)
-# ============================================================
-# QUESTION NAVIGATOR
-# ============================================================
-st.sidebar.markdown(
-    "---"
-)
-st.sidebar.markdown(
-    "### Question Navigator"
-)
-st.sidebar.caption(
-    "🟩 Submitted  |  "
-    "🔵 Current  |  "
-    "⚪ Not submitted"
-)
-# ============================================================
-# NAVIGATION GRID
-# ============================================================
-QUESTIONS_PER_ROW = 5
-for row_start in range(
-    0,
-    total_questions,
-    QUESTIONS_PER_ROW
-):
-    row_questions = (
-        all_question_ids[
-            row_start:
-            row_start
-            + QUESTIONS_PER_ROW
-        ]
-    )
-    columns = st.sidebar.columns(
-        QUESTIONS_PER_ROW
-    )
-    for index, question_id in enumerate(
-        row_questions
-    ):
-        question_number = (
-            all_question_ids.index(
-                question_id
-            )
-            + 1
-        )
-        # ----------------------------------------------------
-        # STATUS
-        # ----------------------------------------------------
-        if question_id in completed_questions:
-            label = (
-                f"🟩 {question_number}"
-            )
-        elif (
-            question_id
-            == st.session_state.current_question
-        ):
-            label = (
-                f"🔵 {question_number}"
-            )
-        else:
-            label = (
-                f"⚪ {question_number}"
-            )
-        # ----------------------------------------------------
-        # BUTTON
-        # ----------------------------------------------------
-        if columns[index].button(
-            label,
-            key=(
-                f"nav_{question_id}"
-            ),
-            use_container_width=True
-        ):
-            st.session_state.current_question = (
-                question_id
-            )
-            st.rerun()
-# ============================================================
-# CURRENT QUESTION
-# ============================================================
-current_question = (
-    st.session_state.current_question
-)
-# ============================================================
-# SUBMITTED QUESTION REVIEW
-# ============================================================
-
-def render_option_line(letter, text):
-    text = "" if pd.isna(text) else str(text)
-    if "{{CODE}}" in text:
-        st.markdown(f"**{letter}.**")
-        render_text_with_code(text)
-    else:
-        st.markdown(f"**{letter}.** {text.replace(chr(92)+'n', ' ').strip()}")
+    return load_questions(QUESTION_FILE.stat().st_mtime)
 
 
-if current_question in completed_questions:
-    q_row = get_question_row(current_question)
-    question_number = (all_question_ids.index(current_question)+ 1)
-    st.info("This question has already been submitted and is locked.")
-    st.subheader(f"Question {question_number}")
-    render_text_with_code(q_row["Question"])
-    st.markdown("### Options")
-    for letter in ["A","B","C","D"]:
-        render_option_line(letter, q_row[letter])
-        
-    st.markdown("---")
-    
-    own_submission = submissions_df[(submissions_df["validator_id"].astype(str) == str(validator_id)) & (submissions_df["question_id"].astype(str) == str(current_question))]
-    if not own_submission.empty:
-        row = own_submission.iloc[-1]
-        st.markdown(f"**Your answer:** `{row['teacher_answer']}` · **Decision:** {row['decision']}")
-        st.markdown(f"Accuracy {row['technical_accuracy']} · Bloom {row['bloom_alignment']} · "
-                    f"Clarity {row['clarity']} · Distractor {row['distractor_quality']} · "
-                    f"Curriculum {row['curriculum_fit']} · Overall {row['overall_suitability']}")
-    if str(row.get("reason_codes", "")).strip():
-        st.markdown(f"**Issues:** {row['reason_codes']}")
-    st.markdown("---")
-    st.success(
-        "Submitted validation is locked.")
-    st.stop()
-# ============================================================
-# CURRENT QUESTION DATA
-# ============================================================
-q_row = get_question_row(
-    current_question
-)
-question_number = (
-    all_question_ids.index(
-        current_question
-    )
-    + 1
-)
-# ============================================================
-# QUESTION HEADER
-# ============================================================
-st.subheader(
-    f"Question {question_number} "
-    f"of {total_questions}"
-)
-st.caption(
-    f"**Topic:** {q_row['Topic']}  ·  **Question Type:** {q_row['Question Type']}  ·  "
-    f"**Target Bloom Level:** {q_row['Bloom']}"
-)
-# ============================================================
-# QUESTION
-# ============================================================
-with st.container(border=True):
-    render_text_with_code(
-        q_row["Question"]
-    )
-# ============================================================
-# OPTIONS
-# ============================================================
-st.markdown(
-    "### Select Your Answer"
-)
-# ------------------------------------------------------------
-# ACTUAL OPTION TEXT
-# ------------------------------------------------------------
-option_values = ["A","B","C","D"]
-def option_format(letter):
-    return get_option_display_text(letter,q_row[letter])
-# ============================================================
-# STAGE 1
-# ============================================================
-if not is_answer_submitted(
-    current_question
-):
-    selected_answer = st.radio(
-        "Select the answer you believe is correct:",
-        options=option_values,
-        index=None,
-        format_func=option_format,
-        key=key_for(
-            "teacher_answer",
-            current_question
-        )
-    )
-    st.markdown("---")
-    if st.button(
-        "Submit My Answer",
-        type="primary",
-        use_container_width=True,
-        key=key_for(
-            "submit_answer",
-            current_question
-        )
-    ):
-        if selected_answer is None:
-            st.warning(
-                "Please select an answer first."
-            )
-        else:
-            submit_independent_answer(
-                current_question
-            )
-            st.rerun()
-    st.stop()
-# ============================================================
-# STAGE 2
-# SYSTEM ANSWER
-# ============================================================
-teacher_answer = (
-    st.session_state.get(
-        key_for(
-            "teacher_answer",
-            current_question
-        )
-    )
-)
-answer_key = str(
-    q_row["Answer"]
-).strip()
-# ------------------------------------------------------------
-# AGREEMENT
-# ------------------------------------------------------------
-if teacher_answer == answer_key:
-    agreement = "AGREE"
-else:
-    agreement = "DISAGREE"
-# ============================================================
-# ANSWER REVEAL
-# ============================================================
-st.markdown("---")
-st.subheader(
-    "System Answer"
-)
-st.markdown(
-    f"**Your Answer:** "
-    f"`{teacher_answer}`"
-)
-st.markdown(
-    f"**System Answer:** "
-    f"`{answer_key}`"
-)
-if agreement == "AGREE":
-    st.success(
-        "Your answer matches the system answer."
-    )
-else:
-    st.warning(
-        "Your answer does not match the system answer."
-    )
-# ============================================================
-# EXPLANATION
-# ============================================================
-st.markdown(
-    "### System Explanation"
-)
-with st.container(border=True):
-    render_text_with_code(
-        q_row["Explanation"]
-    )
-# ============================================================
-# VALIDATION
-# ============================================================
-st.markdown("---")
-st.header(
-    "Item Validation"
-)
-st.markdown(
-    """
-    **Rating Guide**
-    🔴 **1 = Major problem**  
-    🟠 **2 = Significant concern**  
-    🟡 **3 = Moderate concern**  
-    🔵 **4 = Minor concern**  
-    🟢 **5 = No concern**
-    """
-)
-st.caption(
-    "All ratings begin at 🔴 1. "
-    "Adjust them according to your evaluation."
-)
-# ============================================================
-# RATING HELPER
-# ============================================================
-def rating_slider(
-    label,
-    state_name,
-    help_text
-):
-    value = st.slider(
-        label,
-        min_value=1,
-        max_value=5,
-        value=1,
-        step=1,
-        key=key_for(
-            state_name,
-            current_question
-        ),
-        help=help_text
-    )
+def render_text_with_code(value: str) -> None:
+    """Render normal text and marked Python snippets without altering content."""
+    cursor = 0
+    for match in CODE_PATTERN.finditer(value):
+        before = value[cursor:match.start()]
+        if before.strip():
+            st.markdown(html.escape(before).replace("\n", "  \n"))
+        st.code(match.group(1).replace("\\n", "\n").strip("\n"), language="python")
+        cursor = match.end()
+    after = value[cursor:]
+    if after.strip():
+        st.markdown(html.escape(after).replace("\n", "  \n"))
+
+
+def has_code(value: str) -> bool:
+    return bool(CODE_PATTERN.search(value))
+
+
+def option_label(option: tuple[str, str]) -> str:
+    """Keep each full option within its radio choice, including code text."""
+    letter, content = option
+    plain_content = content.replace("{{CODE}}", "").replace("{{/CODE}}", "").replace("\\n", " ")
+    return f"{letter}. " + plain_content
+
+
+def render_question(question: pd.Series) -> None:
     st.caption(
-        RATING_MEANINGS[value]
+        f"Topic: {question['Topic']}   ·   Question Type: {question['Question Type']}   "
+        f"·   Target Bloom Level: {question['Bloom']}"
     )
-    return value
-# ============================================================
-# RATINGS
-# ============================================================
-left_col, right_col = (
-    st.columns(2)
-)
-with left_col:
-    technical_accuracy = rating_slider(
-        "Technical Accuracy",
-        "technical_accuracy",
-        (
-            "Are the question, options, "
-            "answer key, and explanation "
-            "technically correct?"
+    render_text_with_code(question["Question"])
+
+
+def get_sheet() -> Any:
+    """Return the configured worksheet, creating its header if necessary."""
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        info = dict(st.secrets["gcp_service_account"])
+        credentials = Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
-    )
-    bloom_alignment = rating_slider(
-        "Bloom-Level Alignment",
-        "bloom_alignment",
-        (
-            "Does the item require the intended "
-            "level of cognitive processing?"
-        )
-    )
-    clarity = rating_slider(
-        "Clarity",
-        "clarity",
-        (
-            "Is the wording clear and unambiguous?"
-        )
-    )
-with right_col:
-    distractor_quality = rating_slider(
-        "Distractor Quality",
-        "distractor_quality",
-        (
-            "Are incorrect options plausible "
-            "and meaningful?"
-        )
-    )
-    curriculum_fit = rating_slider(
-        "Curriculum Fit",
-        "curriculum_fit",
-        (
-            "Is the question appropriate for "
-            "the intended curriculum?"
-        )
-    )
-    overall_suitability = rating_slider(
-        "Overall Suitability",
-        "overall_suitability",
-        (
-            "Overall suitability of the item "
-            "for the intended assessment."
-        )
-    )
-# ============================================================
-# FINAL DECISION
-# ============================================================
-st.markdown("---")
-st.subheader(
-    "Final Decision"
-)
-decision = st.radio(
-    "Select your final decision:",
-    options=[
-        "ACCEPT",
-        "REVISE",
-        "REJECT"
-    ],
-    index=None,
-    horizontal=True,
-    key=key_for(
-        "decision",
-        current_question
-    )
-)
-# ============================================================
-# REASON CODES
-# ============================================================
-selected_reason_codes = []
-if decision in [
-    "REVISE",
-    "REJECT"
-]:
-    st.markdown(
-        "### Issue Codes"
-    )
-    selected_reason_codes = (
-        st.multiselect(
-            "Select all applicable issues:",
-            options=list(
-                REASON_CODES.keys()
-            ),
-            format_func=lambda code:
-                (
-                    f"{code} — "
-                    f"{REASON_CODES[code]}"
-                ),
-            key=key_for(
-                "reason_codes",
-                current_question
-            )
-        )
-    )
-# ============================================================
-# COMMENTS
-# ============================================================
-comments = st.text_area(
-    "Comments / Suggested Correction",
-    placeholder=(
-        "Optional: Describe the issue "
-        "or suggest a correction."
-    ),
-    key=key_for(
-        "comments",
-        current_question
-    )
-)
-# ============================================================
-# FINAL SUBMISSION
-# ============================================================
-st.markdown("---")
-if st.button(
-    "Submit Validation →",
-    type="primary",
-    use_container_width=True,
-    key=key_for(
-        "submit_validation",
-        current_question
-    )
-):
-    # --------------------------------------------------------
-    # DECISION REQUIRED
-    # --------------------------------------------------------
-    if decision is None:
-        st.warning(
-            "Please select a final decision."
-        )
-        st.stop()
-    # --------------------------------------------------------
-    # DUPLICATE CHECK
-    # --------------------------------------------------------
-    st.cache_data.clear()
-    fresh_submissions = (
-        fetch_submissions()
-    )
-    fresh_completed = (
-        get_completed_questions(
-            fresh_submissions,
-            validator_id
-        )
-    )
-    if current_question in fresh_completed:
-        st.error(
-            "This question has already been submitted."
-        )
-        st.stop()
-    # --------------------------------------------------------
-    # CREATE SUBMISSION
-    # --------------------------------------------------------
-    submission = {
-        "timestamp":
-            datetime.now().isoformat(),
-        "validator_id":
-            validator_id,
-        "validator_name":
-            validator_name,
-        "school":
-            school,
-        "question_id":
-            current_question,
-        "topic":
-            q_row["Topic"],
-        "question_type":
-            q_row[
-                "Question Type"
-            ],
-        "bloom":
-            q_row["Bloom"],
-        # ----------------------------------------------------
-        # INDEPENDENT ANSWER
-        # ----------------------------------------------------
-        "teacher_answer":
-            teacher_answer,
-        "answer_key":
-            answer_key,
-        "answer_agreement":
-            agreement,
-        # ----------------------------------------------------
-        # RATINGS
-        # ----------------------------------------------------
-        "technical_accuracy":
-            technical_accuracy,
-        "bloom_alignment":
-            bloom_alignment,
-        "clarity":
-            clarity,
-        "distractor_quality":
-            distractor_quality,
-        "curriculum_fit":
-            curriculum_fit,
-        "overall_suitability":
-            overall_suitability,
-        # ----------------------------------------------------
-        # DECISION
-        # ----------------------------------------------------
-        "decision":
-            decision,
-        # ----------------------------------------------------
-        # ISSUES
-        # ----------------------------------------------------
-        "reason_codes":
-            " | ".join(
-                selected_reason_codes
-            ),
-        "comments":
-            comments
-    }
-    # --------------------------------------------------------
-    # SAVE
-    # --------------------------------------------------------
-    success, message = (
-        save_submission(
-            submission
-        )
-    )
-    if success:
-        # ----------------------------------------------------
-        # CLEAR CACHE
-        # ----------------------------------------------------
-        st.cache_data.clear()
-        # ----------------------------------------------------
-        # CLEAR QUESTION STATE
-        # ----------------------------------------------------
-        clear_question_state(
-            current_question
-        )
-        # ----------------------------------------------------
-        # REFRESH SUBMISSIONS
-        # ----------------------------------------------------
-        refreshed_submissions = (
-            fetch_submissions()
-        )
-        refreshed_completed = (
-            get_completed_questions(
-                refreshed_submissions,
-                validator_id
-            )
-        )
-        # ----------------------------------------------------
-        # FIND NEXT QUESTION
-        # ----------------------------------------------------
-        next_question = (
-            get_next_unanswered_question(
-                current_question,
-                refreshed_completed
-            )
-        )
-        # ----------------------------------------------------
-        # MOVE
-        # ----------------------------------------------------
-        if next_question:
-            st.session_state.current_question = (
-                next_question
-            )
+        client = gspread.authorize(credentials)
+        spreadsheet = client.open_by_key(st.secrets["sheet_id"])
+        try:
+            worksheet = spreadsheet.worksheet("validations")
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.sheet1
+        header = worksheet.row_values(1)
+        if not header:
+            worksheet.append_row(SHEET_COLUMNS, value_input_option="RAW")
+        elif set(header) != set(SHEET_COLUMNS):
+            raise ValueError("The Google Sheet header does not match the required submission schema.")
+        return worksheet
+    except KeyError as exc:
+        raise RuntimeError("Google Sheets secrets are not configured.") from exc
+
+
+def backup_records() -> list[dict[str, str]]:
+    if not BACKUP_FILE.exists():
+        return []
+    with BACKUP_FILE.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def fetch_submissions() -> list[dict[str, str]]:
+    """Read current records; use local saved records only if Sheets is unavailable."""
+    try:
+        records = get_sheet().get_all_records()
+        return [{key: str(value) for key, value in row.items()} for row in records]
+    except Exception:
+        return backup_records()
+
+
+def append_backup(record: dict[str, str]) -> None:
+    write_header = not BACKUP_FILE.exists()
+    with BACKUP_FILE.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SHEET_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(record)
+
+
+def save_submission(record: dict[str, str]) -> bool:
+    """Return True for Sheets persistence, False when the local fallback was used."""
+    try:
+        sheet = get_sheet()
+        header = sheet.row_values(1)
+        sheet.append_row([record[column] for column in header], value_input_option="RAW")
+        return True
+    except Exception:
+        append_backup(record)
+        return False
+
+
+def matching_submission(records: list[dict[str, str]], validator_id: str, question_id: str) -> dict[str, str] | None:
+    for record in reversed(records):
+        if str(record.get("validator_id")) == validator_id and str(record.get("question_id")) == question_id:
+            return record
+    return None
+
+
+def authenticate_rater() -> None:
+    st.title("RP1 MCQ Validation")
+    st.write("Sign in to complete your independent item validation.")
+    with st.form("rater_login"):
+        rater_id = st.text_input("Rater ID").strip()
+        passphrase = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in")
+    if submitted:
+        validators = st.secrets.get("validators", {})
+        record = validators.get(rater_id)
+        if record and passphrase == record.get("passphrase"):
+            st.session_state.rater = {
+                "id": rater_id, "name": str(record["name"]), "school": str(record["school"]),
+            }
             st.rerun()
+        st.error("Invalid ID or password")
+
+
+def render_locked_question(question: pd.Series, submission: dict[str, str]) -> None:
+    render_question(question)
+    st.subheader("Question options")
+    for letter in "ABCD":
+        option = question[letter]
+        if has_code(option):
+            st.markdown(f"**{letter}.**")
+            render_text_with_code(option)
         else:
-            st.success(
-                "🎉 All questions completed. "
-                "Thank you for your participation."
-            )
-    else:
-        st.error(
-            message
+            st.markdown(f"**{letter}.** {html.escape(option)}")
+    st.divider()
+    st.subheader("Your submitted validation")
+    st.write(f"Your answer: **{submission.get('teacher_answer', '')}**")
+    st.write(f"Answer-key agreement: **{submission.get('answer_agreement', '')}**")
+    rating_values = {label: submission.get(field, "") for field, label in RATING_FIELDS}
+    st.dataframe(pd.DataFrame([rating_values]), hide_index=True, use_container_width=True)
+    st.write(f"Decision: **{submission.get('decision', '')}**")
+    if submission.get("reason_codes"):
+        st.write(f"Reason codes: {submission['reason_codes']}")
+    if submission.get("comments"):
+        st.write(f"Comments: {submission['comments']}")
+    st.info("This response is locked to protect the study's independent judgment.")
+
+
+def render_open_question(question: pd.Series, rater: dict[str, str], submitted_ids: set[str]) -> None:
+    question_id = question["ID"]
+    render_question(question)
+    answer_key = widget_key("teacher_answer", question_id)
+    stage_key = widget_key("stage", question_id)
+
+    if st.session_state.get(stage_key) != "revealed":
+        st.subheader("Stage 1 — Your independent answer")
+        option_values = [(letter, question[letter]) for letter in "ABCD"]
+        answer = st.radio(
+            "Choose the best answer before viewing the answer key.",
+            option_values,
+            index=None,
+            format_func=option_label,
+            key=answer_key,
         )
+        if st.button("Reveal answer key", disabled=answer is None, key=widget_key("reveal", question_id)):
+            st.session_state[stage_key] = "revealed"
+            st.rerun()
+        return
+
+    selected = st.session_state.get(answer_key)
+    agreement = "AGREE" if selected and selected[0] == question["Answer"].strip() else "DISAGREE"
+    st.subheader("Stage 2 — Answer key")
+    st.write(f"Correct answer: **{question['Answer']}**")
+    render_text_with_code(question["Explanation"])
+    st.write(f"Your answer-key agreement: **{agreement}**")
+
+    st.subheader("Stage 3 — Item ratings")
+    ratings: dict[str, int] = {}
+    for field, label in RATING_FIELDS:
+        ratings[field] = st.slider(label, 1, 5, 3, key=widget_key(field, question_id))
+
+    st.subheader("Stage 4 — Decision")
+    decision = st.radio("Decision", ["ACCEPT", "REVISE", "REJECT"], index=None, key=widget_key("decision", question_id))
+    reasons: list[str] = []
+    if decision in {"REVISE", "REJECT"}:
+        reasons = st.multiselect("Reason codes", REASON_CODES, key=widget_key("reason_codes", question_id))
+    comments = st.text_area("Suggested Correction / Comments (optional)", key=widget_key("comments", question_id))
+
+    can_submit = selected is not None and decision is not None and (decision == "ACCEPT" or bool(reasons))
+    if st.button("Submit validation", type="primary", disabled=not can_submit, key=widget_key("submit", question_id)):
+        # Re-read immediately before writing: never trust the on-screen snapshot.
+        current_records = fetch_submissions()
+        if matching_submission(current_records, rater["id"], question_id):
+            st.warning("A submission for this question already exists. It has not been changed.")
+            navigate_to(question_id, {str(row.get("question_id")) for row in current_records})
+            st.rerun()
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "question_id": question_id,
+            "topic": question["Topic"],
+            "bloom": question["Bloom"],
+            "decision": decision,
+            "school": rater["school"],
+            "question_type": question["Question Type"],
+            "teacher_answer": selected[0],
+            "answer_key": question["Answer"].strip(),
+            "answer_agreement": agreement,
+            "validator_id": rater["id"],
+            "validator_name": rater["name"],
+            **{field: str(value) for field, value in ratings.items()},
+            "reason_codes": " | ".join(reasons),
+            "comments": comments.strip(),
+        }
+        saved_to_sheets = save_submission(record)
+        if saved_to_sheets:
+            st.success("Validation saved.")
+        else:
+            st.warning("Google Sheets was unavailable. Your response was saved locally in validations_backup.csv.")
+        submitted_ids.add(question_id)
+        unanswered = [qid for qid in st.session_state.question_ids if qid not in submitted_ids]
+        if unanswered:
+            navigate_to(unanswered[0], submitted_ids)
+        st.rerun()
+
+
+def rater_portal() -> None:
+    if "rater" not in st.session_state:
+        authenticate_rater()
+        return
+    questions = get_questions()
+    rater = st.session_state.rater
+    st.title("RP1 MCQ Validation")
+    st.caption(f"Signed in as {rater['name']} · {rater['school']}")
+    records = fetch_submissions()
+    own_records = [row for row in records if str(row.get("validator_id")) == rater["id"]]
+    submitted_ids = {str(row.get("question_id")) for row in own_records}
+    st.session_state.question_ids = questions["ID"].tolist()
+    if "current_question_id" not in st.session_state:
+        unanswered = [qid for qid in st.session_state.question_ids if qid not in submitted_ids]
+        st.session_state.current_question_id = unanswered[0] if unanswered else st.session_state.question_ids[0]
+
+    st.progress(len(submitted_ids) / len(questions), text=f"{len(submitted_ids)} of {len(questions)} completed")
+    st.caption("Navigator: ✓ submitted · ● current · ○ not yet submitted")
+    columns = st.columns(8)
+    for index, question_id in enumerate(st.session_state.question_ids):
+        marker = "✓" if question_id in submitted_ids else ("●" if question_id == st.session_state.current_question_id else "○")
+        if columns[index % 8].button(f"{marker} {index + 1}", key=f"nav_{question_id}"):
+            navigate_to(question_id, submitted_ids)
+            st.rerun()
+
+    current = questions.loc[questions["ID"] == st.session_state.current_question_id].iloc[0]
+    locked = matching_submission(own_records, rater["id"], current["ID"])
+    if locked:
+        render_locked_question(current, locked)
+    else:
+        render_open_question(current, rater, submitted_ids)
+
+    if len(submitted_ids) == len(questions):
+        st.success("All questions are complete. Thank you for your validation work.")
+
+
+def admin_portal() -> None:
+    st.title("Admin dashboard")
+    if not st.session_state.get("admin_unlocked"):
+        password = st.text_input("Admin password", type="password")
+        if st.button("Unlock dashboard"):
+            if password and password == st.secrets.get("ADMIN_PASSWORD"):
+                st.session_state.admin_unlocked = True
+                st.rerun()
+            st.error("Invalid password")
+        return
+    data = pd.DataFrame(fetch_submissions(), columns=SHEET_COLUMNS)
+    if data.empty:
+        st.info("No submissions yet.")
+        return
+    st.metric("Total submissions", len(data))
+    metrics = st.columns(3)
+    metrics[0].metric("Questions reviewed", data["question_id"].nunique())
+    metrics[1].metric("Participating raters", data["validator_id"].nunique())
+    metrics[2].metric("Accept rate", f"{(data['decision'].eq('ACCEPT').mean() * 100):.1f}%")
+    st.subheader("Answer-key agreement")
+    st.bar_chart(data["answer_agreement"].value_counts())
+    st.subheader("Average rating")
+    ratings = data[[field for field, _ in RATING_FIELDS]].apply(pd.to_numeric, errors="coerce").mean()
+    st.bar_chart(ratings)
+    st.subheader("Decision distribution")
+    st.bar_chart(data["decision"].value_counts())
+    st.subheader("Reason-code frequency")
+    reasons = data["reason_codes"].fillna("").str.split(r" \| ").explode()
+    reasons = reasons[reasons.ne("")]
+    if reasons.empty:
+        st.caption("No reason codes have been submitted.")
+    else:
+        st.bar_chart(reasons.value_counts())
+    st.subheader("Per-question average ratings")
+    question_scores = data.assign(**{field: pd.to_numeric(data[field], errors="coerce") for field, _ in RATING_FIELDS})
+    st.dataframe(question_scores.groupby("question_id")[[field for field, _ in RATING_FIELDS]].mean(), use_container_width=True)
+    st.subheader("Raw submissions")
+    st.dataframe(data, use_container_width=True)
+    st.download_button("Download CSV", data.to_csv(index=False).encode("utf-8"), "rp1_validations.csv", "text/csv")
+
+
+def main() -> None:
+    st.set_page_config(page_title="RP1 Validation", page_icon="✓", layout="wide")
+    page = st.sidebar.radio("Portal", ["Rater validation", "Admin dashboard"])
+    if page == "Admin dashboard":
+        admin_portal()
+    else:
+        rater_portal()
+
+
+if __name__ == "__main__":
+    main()
