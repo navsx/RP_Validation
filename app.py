@@ -278,21 +278,21 @@ def sign_out_rater() -> None:
 
 
 def authenticate_rater() -> None:
-    
-    with st.expander("📋 What you're rating — quick reference"):
-    st.markdown("""
-    **Technical Accuracy** — is the question, code, and answer key correct?
-    **Bloom Alignment** — does it require the *labeled* level, not more or less?
-    **Question Clarity** — is the wording unambiguous?
-    **Distractor Quality** — are the wrong options plausible?
-    **Curriculum Fit** — does it belong under its labeled topic?
-    **Overall Suitability** — would you use this with your own students?
-
-    **Bloom's Taxonomy** — Remember (recall) · Understand (explain, no execution) ·
-    Apply (use a rule on given data) · Analyse (trace/debug multi-step logic)
-    """)
-    
     st.subheader("Sign in")
+
+    with st.expander("📋 What you're rating — quick reference"):
+        st.markdown("""
+        **Technical Accuracy** — is the question, code, and answer key correct?
+        **Bloom Alignment** — does it require the *labeled* level, not more or less?
+        **Question Clarity** — is the wording unambiguous?
+        **Distractor Quality** — are the wrong options plausible?
+        **Curriculum Fit** — does it belong under its labeled topic?
+        **Overall Suitability** — would you use this with your own students?
+    
+        **Bloom's Taxonomy** — Remember (recall) · Understand (explain, no execution) ·
+        Apply (use a rule on given data) · Analyse (trace/debug multi-step logic)
+        """)
+    
     st.write("Sign in to complete your independent item validation.")
     with st.form("rater_login"):
         rater_id = st.text_input("Rater ID").strip()
