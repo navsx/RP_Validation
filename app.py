@@ -55,7 +55,7 @@ def widget_key(field: str, question_id: str) -> str:
 
 def reset_question_form(question_id: str) -> None:
     """Remove all unsaved state for a question before navigating into it."""
-    fields = ["stage", "teacher_answer", "decision", "reason_codes", "comments"]
+    fields = ["stage", "teacher_answer", "committed_answer", "decision", "reason_codes", "comments"]
     fields.extend(field for field, _ in RATING_FIELDS)
     for field in fields:
         st.session_state.pop(widget_key(field, question_id), None)
@@ -112,11 +112,27 @@ def option_label(option: tuple[str, str]) -> str:
 
 
 def render_question(question: pd.Series) -> None:
-    st.caption(
-        f"Topic: {question['Topic']}   ·   Question Type: {question['Question Type']}   "
-        f"·   Target Bloom Level: {question['Bloom']}"
+    metadata = (
+        f"<span>Topic: {html.escape(question['Topic'])}</span>"
+        f"<span>Question Type: {html.escape(question['Question Type'])}</span>"
+        f"<span>Target Bloom Level: {html.escape(question['Bloom'])}</span>"
     )
-    render_text_with_code(question["Question"])
+    st.markdown(f'<div class="question-metadata">{metadata}</div>', unsafe_allow_html=True)
+    if has_code(question["Question"]):
+        render_text_with_code(question["Question"])
+    else:
+        st.markdown(f'<div class="question-prompt">{html.escape(question["Question"])}</div>', unsafe_allow_html=True)
+
+
+def render_options(question: pd.Series) -> None:
+    """Keep the choices visible when the teacher is rating an item."""
+    for letter in "ABCD":
+        option = question[letter]
+        if has_code(option):
+            st.markdown(f"**{letter}.**")
+            render_text_with_code(option)
+        else:
+            st.markdown(f"**{letter}.** {html.escape(option)}")
 
 
 def get_sheet() -> Any:
@@ -189,8 +205,15 @@ def matching_submission(records: list[dict[str, str]], validator_id: str, questi
     return None
 
 
+def rater_submissions() -> list[dict[str, str]]:
+    """Avoid a network read on every widget rerun; writes still re-check fresh."""
+    if "rater_submissions" not in st.session_state:
+        st.session_state.rater_submissions = fetch_submissions()
+    return st.session_state.rater_submissions
+
+
 def authenticate_rater() -> None:
-    st.title("RP1 MCQ Validation")
+    st.title("MCQ Validation")
     st.write("Sign in to complete your independent item validation.")
     with st.form("rater_login"):
         rater_id = st.text_input("Rater ID").strip()
@@ -210,13 +233,7 @@ def authenticate_rater() -> None:
 def render_locked_question(question: pd.Series, submission: dict[str, str]) -> None:
     render_question(question)
     st.subheader("Question options")
-    for letter in "ABCD":
-        option = question[letter]
-        if has_code(option):
-            st.markdown(f"**{letter}.**")
-            render_text_with_code(option)
-        else:
-            st.markdown(f"**{letter}.** {html.escape(option)}")
+    render_options(question)
     st.divider()
     st.subheader("Your submitted validation")
     st.write(f"Your answer: **{submission.get('teacher_answer', '')}**")
@@ -238,34 +255,44 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
     stage_key = widget_key("stage", question_id)
 
     if st.session_state.get(stage_key) != "revealed":
-        st.subheader("Stage 1 — Your independent answer")
         option_values = [(letter, question[letter]) for letter in "ABCD"]
         answer = st.radio(
-            "Choose the best answer before viewing the answer key.",
+            "Independent answer",
             option_values,
             index=None,
             format_func=option_label,
             key=answer_key,
+            label_visibility="collapsed",
         )
-        if st.button("Reveal answer key", disabled=answer is None, key=widget_key("reveal", question_id)):
+        if st.button("Submit answer", disabled=answer is None, type="primary", key=widget_key("reveal", question_id)):
+            # Radio widget state is removed once this stage is no longer rendered.
+            # Persist the committed blind answer separately for later scoring.
+            st.session_state[widget_key("committed_answer", question_id)] = answer[0]
             st.session_state[stage_key] = "revealed"
             st.rerun()
         return
 
-    selected = st.session_state.get(answer_key)
-    agreement = "AGREE" if selected and selected[0] == question["Answer"].strip() else "DISAGREE"
-    st.subheader("Stage 2 — Answer key")
+    selected = st.session_state.get(widget_key("committed_answer", question_id))
+    agreement = "AGREE" if selected == question["Answer"].strip() else "DISAGREE"
+    st.markdown("### Your answer and the answer key")
+    render_options(question)
+    st.write(f"Your selected answer: **{selected}**")
     st.write(f"Correct answer: **{question['Answer']}**")
     render_text_with_code(question["Explanation"])
     st.write(f"Your answer-key agreement: **{agreement}**")
 
-    st.subheader("Stage 3 — Item ratings")
+    st.markdown("### Item validation")
     ratings: dict[str, int] = {}
-    for field, label in RATING_FIELDS:
-        ratings[field] = st.slider(label, 1, 5, 3, key=widget_key(field, question_id))
+    left, right = st.columns(2)
+    for index, (field, label) in enumerate(RATING_FIELDS):
+        with (left if index < 3 else right):
+            ratings[field] = st.slider(label, 1, 5, 1, key=widget_key(field, question_id))
 
-    st.subheader("Stage 4 — Decision")
-    decision = st.radio("Decision", ["ACCEPT", "REVISE", "REJECT"], index=None, key=widget_key("decision", question_id))
+    st.markdown("### Final decision")
+    decision = st.radio(
+        "Decision", ["ACCEPT", "REVISE", "REJECT"], index=None,
+        horizontal=True, key=widget_key("decision", question_id),
+    )
     reasons: list[str] = []
     if decision in {"REVISE", "REJECT"}:
         reasons = st.multiselect("Reason codes", REASON_CODES, key=widget_key("reason_codes", question_id))
@@ -287,7 +314,7 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
             "decision": decision,
             "school": rater["school"],
             "question_type": question["Question Type"],
-            "teacher_answer": selected[0],
+            "teacher_answer": selected,
             "answer_key": question["Answer"].strip(),
             "answer_agreement": agreement,
             "validator_id": rater["id"],
@@ -301,6 +328,7 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
             st.success("Validation saved.")
         else:
             st.warning("Google Sheets was unavailable. Your response was saved locally in validations_backup.csv.")
+        st.session_state.rater_submissions = current_records + [record]
         submitted_ids.add(question_id)
         unanswered = [qid for qid in st.session_state.question_ids if qid not in submitted_ids]
         if unanswered:
@@ -314,9 +342,9 @@ def rater_portal() -> None:
         return
     questions = get_questions()
     rater = st.session_state.rater
-    st.title("RP1 MCQ Validation")
+    st.title("MCQ Validation")
     st.caption(f"Signed in as {rater['name']} · {rater['school']}")
-    records = fetch_submissions()
+    records = rater_submissions()
     own_records = [row for row in records if str(row.get("validator_id")) == rater["id"]]
     submitted_ids = {str(row.get("question_id")) for row in own_records}
     st.session_state.question_ids = questions["ID"].tolist()
@@ -324,14 +352,18 @@ def rater_portal() -> None:
         unanswered = [qid for qid in st.session_state.question_ids if qid not in submitted_ids]
         st.session_state.current_question_id = unanswered[0] if unanswered else st.session_state.question_ids[0]
 
-    st.progress(len(submitted_ids) / len(questions), text=f"{len(submitted_ids)} of {len(questions)} completed")
-    st.caption("Navigator: ✓ submitted · ● current · ○ not yet submitted")
-    columns = st.columns(8)
-    for index, question_id in enumerate(st.session_state.question_ids):
-        marker = "✓" if question_id in submitted_ids else ("●" if question_id == st.session_state.current_question_id else "○")
-        if columns[index % 8].button(f"{marker} {index + 1}", key=f"nav_{question_id}"):
-            navigate_to(question_id, submitted_ids)
-            st.rerun()
+    st.sidebar.markdown("### Progress")
+    st.sidebar.progress(len(submitted_ids) / len(questions), text=f"{len(submitted_ids)} of {len(questions)} completed")
+    st.sidebar.markdown("### Question navigator")
+    st.sidebar.caption("✓ submitted · ● current · ○ not yet submitted")
+    for row_start in range(0, len(st.session_state.question_ids), 5):
+        columns = st.sidebar.columns(5)
+        for index, question_id in enumerate(st.session_state.question_ids[row_start:row_start + 5]):
+            number = row_start + index + 1
+            marker = "✓" if question_id in submitted_ids else ("●" if question_id == st.session_state.current_question_id else "○")
+            if columns[index].button(f"{marker} {number}", key=f"nav_{question_id}", use_container_width=True):
+                navigate_to(question_id, submitted_ids)
+                st.rerun()
 
     current = questions.loc[questions["ID"] == st.session_state.current_question_id].iloc[0]
     locked = matching_submission(own_records, rater["id"], current["ID"])
@@ -386,8 +418,29 @@ def admin_portal() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="RP1 Validation", page_icon="✓", layout="wide")
-    page = st.sidebar.radio("Portal", ["Rater validation", "Admin dashboard"])
+    st.set_page_config(page_title="MCQ Validation", page_icon="✓", layout="wide")
+    st.markdown(
+        """
+        <style>
+        .question-metadata {
+            display: flex; flex-wrap: wrap; gap: .45rem;
+            margin: .3rem 0 .8rem;
+        }
+        .question-metadata span {
+            background: #e7f0ff; border-left: 4px solid #1769aa;
+            color: #123d68; font-size: 1rem; font-weight: 700;
+            padding: .42rem .65rem; border-radius: .25rem;
+        }
+        .question-prompt {
+            color: #162a3a; font-size: 1.22rem; font-weight: 650;
+            line-height: 1.5; margin-bottom: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.title("MCQ Validation")
+    page = st.sidebar.radio("View", ["Rater validation", "Admin dashboard"])
     if page == "Admin dashboard":
         admin_portal()
     else:
