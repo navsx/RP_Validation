@@ -42,6 +42,13 @@ RATING_FIELDS = [
     ("curriculum_fit", "Curriculum Fit"),
     ("overall_suitability", "Overall Suitability"),
 ]
+RATING_LABELS = {
+    "1": "Major problem",
+    "2": "Significant concern",
+    "3": "Acceptable",
+    "4": "Good",
+    "5": "Excellent",
+}
 REASON_CODES = [
     "WRONG_KEY", "EXPLANATION_ERROR", "BLOOM_MISMATCH", "CLARITY", "DISTRACTOR",
     "CURRICULUM", "MULTIPLE_VALID_ANSWERS", "DIFFICULTY", "OTHER",
@@ -166,21 +173,22 @@ def set_rating(widget_state_key: str, value: int) -> None:
     st.session_state[widget_state_key] = value
 
 
-def rating_control(label: str, field: str, question_id: str) -> int:
-    """A slider with one-click 1–5 shortcuts for mouse and touch users."""
+def rating_control(label: str, field: str, question_id: str) -> int | None:
+    """Five compact, explicit ratings with no default selection."""
     state_key = widget_key(field, question_id)
-    value = st.slider(label, 1, 5, 1, key=state_key)
-    quick_set = st.columns(5, gap="small")
-    for score, colour in enumerate(("🔴", "🟠", "🟡", "🔵", "🟢"), start=1):
-        quick_set[score - 1].button(
-            f"{score} {colour}",
+    selected = st.session_state.get(state_key)
+    choices = st.columns(5, gap="small")
+    for score in range(1, 6):
+        choices[score - 1].button(
+            str(score),
             key=widget_key(f"set_{field}_{score}", question_id),
+            type="primary" if selected == score else "secondary",
             on_click=set_rating,
             args=(state_key, score),
             use_container_width=True,
-            help=f"Set {label} to {score}",
+            help=f"Set {label} to rating {score}",
         )
-    return value
+    return st.session_state.get(state_key)
 
 
 def get_sheet() -> Any:
@@ -286,7 +294,10 @@ def render_locked_question(question: pd.Series, submission: dict[str, str]) -> N
     st.subheader("Your submitted validation")
     st.write(f"Your answer: **{submission.get('teacher_answer', '')}**")
     st.write(f"Answer-key agreement: **{submission.get('answer_agreement', '')}**")
-    rating_values = {label: submission.get(field, "") for field, label in RATING_FIELDS}
+    rating_values = {
+        label: f"{submission.get(field, '')} — {RATING_LABELS.get(str(submission.get(field, '')), 'Not recorded')}"
+        for field, label in RATING_FIELDS
+    }
     st.dataframe(pd.DataFrame([rating_values]), hide_index=True, use_container_width=True)
     st.write(f"Decision: **{submission.get('decision', '')}**")
     if submission.get("reason_codes"):
@@ -329,24 +340,36 @@ def render_open_question(question: pd.Series, rater: dict[str, str], submitted_i
     st.write(f"Your answer-key agreement: **{agreement}**")
 
     st.markdown("### Item validation")
-    st.caption("Click the slider track or use the coloured 1–5 buttons to set a rating instantly.")
-    ratings: dict[str, int] = {}
+    st.markdown(
+        """
+        <table class="rating-scale">
+          <tr><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th></tr>
+          <tr><td>Major problem</td><td>Significant concern</td><td>Acceptable</td><td>Good</td><td>Excellent</td></tr>
+        </table>
+        """,
+        unsafe_allow_html=True,
+    )
+    ratings: dict[str, int | None] = {}
     left, right = st.columns(2)
     for index, (field, label) in enumerate(RATING_FIELDS):
         with (left if index < 3 else right):
+            st.markdown(f"**{label}**")
             ratings[field] = rating_control(label, field, question_id)
 
+    ratings_complete = all(value is not None for value in ratings.values())
     st.markdown("### Final decision")
     decision = st.radio(
         "Decision", ["ACCEPT", "REVISE", "REJECT"], index=None,
-        horizontal=True, key=widget_key("decision", question_id),
+        horizontal=True, key=widget_key("decision", question_id), disabled=not ratings_complete,
     )
+    if not ratings_complete:
+        st.caption("Select a rating for all six criteria to unlock the final decision.")
     reasons: list[str] = []
     if decision in {"REVISE", "REJECT"}:
         reasons = st.multiselect("Reason codes", REASON_CODES, key=widget_key("reason_codes", question_id))
     comments = st.text_area("Suggested Correction / Comments (optional)", key=widget_key("comments", question_id))
 
-    can_submit = selected is not None and decision is not None and (decision == "ACCEPT" or bool(reasons))
+    can_submit = ratings_complete and selected is not None and decision is not None and (decision == "ACCEPT" or bool(reasons))
     if st.button("Submit validation", type="primary", disabled=not can_submit, key=widget_key("submit", question_id)):
         # Re-read immediately before writing: never trust the on-screen snapshot.
         current_records = fetch_submissions()
@@ -550,6 +573,15 @@ def main() -> None:
         .admin-grid { text-align: center; border-radius: .35rem; padding: .4rem 0; margin: .12rem 0; }
         .admin-grid-done { background: #e5f6ea; color: #14532d; border: 1px solid #76b58b; }
         .admin-grid-open { background: #eef2f5; color: #52616d; border: 1px solid #c5d0d8; }
+        .rating-scale { width: 100%; border-collapse: separate; border-spacing: .25rem; margin: .2rem 0 1rem; }
+        .rating-scale th, .rating-scale td { text-align: center; border-radius: .3rem; padding: .3rem; }
+        .rating-scale th { color: #27384a; font-size: .9rem; }
+        .rating-scale td { font-size: .78rem; color: #384b5d; }
+        .rating-scale th:nth-child(1), .rating-scale td:nth-child(1) { background: #fbe9ea; }
+        .rating-scale th:nth-child(2), .rating-scale td:nth-child(2) { background: #fff1df; }
+        .rating-scale th:nth-child(3), .rating-scale td:nth-child(3) { background: #fff8df; }
+        .rating-scale th:nth-child(4), .rating-scale td:nth-child(4) { background: #eaf1fb; }
+        .rating-scale th:nth-child(5), .rating-scale td:nth-child(5) { background: #e8f5f1; }
         </style>
         """,
         unsafe_allow_html=True,
